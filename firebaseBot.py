@@ -30,7 +30,7 @@ LURKER = "<:lurker:1257490595266560071>"
 TRIPLE_GIF="https://tenor.com/view/rodrick-camera-point-rodrick-heffley-diary-of-a-wimpy-kid-gif-13001614153341977897"
 
 CHANNEL = os.getenv("CHANNEL")
-USER_ID = int(os.getenv("USER")) # Ensure USER_ID is an integer
+USER_ID = int(os.getenv("USER_ID")) # Ensure USER_ID is an integer
 API_URL = os.getenv("API")
 CHANNEL_ID=int(os.getenv("CHANNEL_ID")) # Ensure CHANNEL_ID is an integer
 

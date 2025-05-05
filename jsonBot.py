@@ -25,7 +25,7 @@ LURKER = "<:lurker:1257490595266560071>"
 TRIPLE_GIF="https://tenor.com/view/rodrick-camera-point-rodrick-heffley-diary-of-a-wimpy-kid-gif-13001614153341977897"
 
 CHANNEL = os.getenv("CHANNEL")  # replace with your specific channel
-USER_ID = os.getenv("USER")  # replace with specific user ID for tracking
+USER_ID = os.getenv("USER_ID")  # replace with specific user ID for tracking
 API_URL = os.getenv("API")
 CHANNEL_ID=os.getenv("CHANNEL_ID")  # replace with your specific channel ID
 
