@@ -1,0 +1,48 @@
+name: Deploy Discord Bot with PM2
+
+# Trigger the workflow on push events to the main branch
+on:
+  push:
+    branches:
+      - main # Or master, depending on your default branch name
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # Checks out your repository code
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }} # Server IP/hostname from secrets
+          username: ${{ secrets.SSH_USER }} # Server username from secrets
+          key: ${{ secrets.SSH_PRIVATE_KEY }} # SSH private key from secrets
+          script: |
+            # Navigate to the bot directory on the server
+            # Make sure this path is correct!
+            cd /home/${{ secrets.SSH_USER }}/discord-bot
+
+            # Pull the latest changes from the main branch
+            git checkout main # Ensure we are on the main branch
+            git pull origin main
+
+            # Install/update dependencies using the pip from the venv
+            # Make sure the path to venv/bin/pip is correct
+            ./venv/bin/pip install -r requirements.txt
+            # If not using venv, you might use: pip install -r requirements.txt
+
+            # Reload the environment variables for pm2 (if needed, often restart is enough)
+            # pm2 reload ecosystem.config.js --env production # Example if using ecosystem file
+
+            # Restart the bot using pm2. It will find the process by name.
+            # pm2 restart will do a 0-second downtime reload
+            pm2 restart discord-bot
+
+            # Optional: Save the pm2 process list if you make changes often
+            # pm2 save
+
+            echo "Deployment successful! Bot restarted via pm2."
+
