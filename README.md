@@ -9,7 +9,7 @@ Announces when someone goes online. My friend Alex typically lurks in our server
 
 ### .env File
 Have an env file with the following information
-`
+```
 DISCORD_BOT_TOKEN= # Discord Bot Token
 API= # URL to LLM model, I self host mine
 USER=1 # User you are tracking
@@ -19,4 +19,4 @@ AUDIO_FILE= # Path to audio
 CHANNEL_ID= # Channel ID for where tracking messages are sent
 FIREBASE_SERVICE_ACCOUNT_KEY= # Path to your Firebase JSON
 FIREBASE_DATABASE_URL= # URL to your Firebase database
-`
+```
