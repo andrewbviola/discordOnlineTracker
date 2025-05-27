@@ -29,6 +29,9 @@ USER_ID = os.getenv("USER_ID")  # replace with specific user ID for tracking
 API_URL = os.getenv("API")
 CHANNEL_ID=os.getenv("CHANNEL_ID")  # replace with your specific channel ID
 
+CHAT_KEY = os.getenv("CHAT_KEY")
+ALEX_KEY = os.getenv("ALEX_KEY")
+
 intents = discord.Intents.all()
 intents.presences = True
 intents.members = True
@@ -45,30 +48,47 @@ user_status = defaultdict(
 regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 
 
+# --- API Call Function (Unchanged) ---
 def send_prompt(
     prompt, max_length=50, do_sample=True, top_k=50, top_p=0.95, temperature=1.0
 ):
-    # Prepare the payload
     payload = {
-        "prompt": prompt,
-        "max_length": max_length,
-        "do_sample": do_sample,
-        "top_k": top_k,
-        "top_p": top_p,
-        "temperature": temperature,
+        "prompt": prompt, "max_length": max_length, "do_sample": do_sample,
+        "top_k": top_k, "top_p": top_p, "temperature": temperature,"key": CHAT_KEY
     }
-
     try:
-        # Send the POST request
-        response = requests.post(API_URL, json=payload)
-
-        # Check if the response is successful
+        response = requests.post(f"{API_URL}/generate", json=payload)
         if response.status_code == 200:
             data = response.json()
             return data.get("response", "No response field found")
         else:
             return f"Error: Received status code {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        return "Error: Could not connect to the API." # Return error message
+    
+def remove_think_blocks(text):
+    cleaned = re.sub(r"<think>[\s\S]*?<\/think>", "", text)
+    return cleaned.lstrip("\n")
+    
+def send_think(prompt):
 
+    payload = {
+        "key": ALEX_KEY,
+        "prompt": prompt,
+    }
+
+    try:
+        # Send the POST request
+        response = requests.post(f"{API_URL}/think", json=payload)
+
+        # Check if the response is successful
+        if response.status_code == 200:
+            data = response.json()
+            cleaned_response = remove_think_blocks(data.get("response", "No response field found"))
+            return cleaned_response
+        else:
+            return f"Error: Received status code {response.status_code}"
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
 
@@ -276,7 +296,7 @@ async def leaderboard(
 
 @bot.command(
     name="chat",
-    brief="Responds with an Alex message",
+    brief="Responds with an Alex complete the sentence",
     description="Responds with a message trained on alex's discord messages",
 )
 async def chat(
@@ -285,14 +305,26 @@ async def chat(
     if prompt is None:
         await ctx.send("No prompt")
     else:
+        # Consider adding async handling if send_prompt takes long
         output = send_prompt(
-            prompt=prompt,
-            max_length=50,
-            do_sample=True,
-            top_k=40,
-            top_p=0.9,
-            temperature=0.7,
+            prompt=prompt, max_length=50, do_sample=True,
+            top_k=40, top_p=0.9, temperature=0.7,
         )
+        await ctx.send(output)
+        
+@bot.command(
+    name="think",
+    brief="Respond with an attitude like Alex",
+    description="Responds with a message that was trained to sound like Alex",
+)
+async def think(
+    ctx, *, prompt: str = commands.parameter(default=None, description="A prompt")
+):
+    if prompt is None:
+        await ctx.send("No prompt")
+    else:
+        # Consider adding async handling if send_prompt takes long
+        output = send_think(prompt=prompt)
         await ctx.send(output)
 
 
