@@ -9,6 +9,7 @@ import os
 import matplotlib.pyplot as plt
 import io
 import requests
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -80,7 +81,7 @@ def send_think(prompt):
 
     try:
         # Send the POST request
-        response = requests.post(f"{API_URL}/think", json=payload)
+        response = requests.post(f"{API_URL}/think", json=payload, timeout=300)
 
         # Check if the response is successful
         if response.status_code == 200:
