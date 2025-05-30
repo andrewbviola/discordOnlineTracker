@@ -447,6 +447,7 @@ async def think(
         # Send thinking text first if it exists
         if thinking_text and show_thinking:
             await ctx.send(f"**Thinking:**\n{thinking_text}")
+            await ctx.send(f"**-----------------------------------**")
         
         # Send clean response if it exists
         if clean_response:
