@@ -69,6 +69,7 @@ user_status = defaultdict(
 regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 no_message_data = defaultdict(int)
 audio_counts = {"count": 0} # Simple dict for audio count
+show_thinking = True  # Toggle for displaying thinking messages
 
 # --- Firebase Data Loading ---
 def load_data_from_firebase():
@@ -177,7 +178,12 @@ def send_prompt(
 def remove_think_blocks(text):
     cleaned = re.sub(r"<think>[\s\S]*?<\/think>", "", text)
     return cleaned.lstrip("\n")
-    
+
+def extract_think_blocks(text):
+    """Extract only the text between <think></think> tags."""
+    matches = re.findall(r"<think>([\s\S]*?)<\/think>", text)
+    return "\n".join(matches).strip() if matches else ""
+
 def send_think(prompt):
 
     payload = {
@@ -192,8 +198,8 @@ def send_think(prompt):
         # Check if the response is successful
         if response.status_code == 200:
             data = response.json()
-            cleaned_response = remove_think_blocks(data.get("response", "No response field found"))
-            return cleaned_response
+            # cleaned_response = remove_think_blocks(data.get("response", "No response field found"))
+            return data.get("response", "No response field found")
         else:
             return f"Error: Received status code {response.status_code}"
     except requests.exceptions.RequestException as e:
@@ -431,9 +437,34 @@ async def think(
     if prompt is None:
         await ctx.send("No prompt")
     else:
-        # Consider adding async handling if send_prompt takes long
-        output = send_think(prompt=prompt)
-        await ctx.send(output)
+        # Get the full response including think blocks
+        full_response = send_think(prompt=prompt)
+        
+        # Extract thinking text and clean response
+        thinking_text = extract_think_blocks(full_response)
+        clean_response = remove_think_blocks(full_response)
+        
+        # Send thinking text first if it exists
+        if thinking_text and show_thinking:
+            await ctx.send(f"**Thinking:**\n{thinking_text}")
+        
+        # Send clean response if it exists
+        if clean_response:
+            await ctx.send(clean_response)
+        elif not thinking_text:
+            # If neither thinking nor clean response, send the original
+            await ctx.send(full_response)
+
+@bot.command(
+    name="thought",
+    brief="Toggle thinking message display",
+    description="Toggles whether thinking messages are shown in the think command",
+)
+async def thought(ctx):
+    global show_thinking
+    show_thinking = not show_thinking
+    status = "enabled" if show_thinking else "disabled"
+    await ctx.send(f"Thinking messages are now **{status}**.")
 
 @bot.command(
     name="alex",
