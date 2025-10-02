@@ -3,15 +3,15 @@ import pytz
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, time
 from collections import defaultdict
-import json # Keep for potential API interactions, but not file storage
+import json  # Keep for potential API interactions, but not file storage
 import asyncio
 import os
 import matplotlib.pyplot as plt
 import io
 import requests
 from dotenv import load_dotenv
-import firebase_admin # Import Firebase
-from firebase_admin import credentials, db # Import credentials and db
+import firebase_admin  # Import Firebase
+from firebase_admin import credentials, db  # Import credentials and db
 import re
 
 load_dotenv()
@@ -28,12 +28,12 @@ FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL")
 LURKIN = "<:lurkin:1275247450285932565>"
 LURKER = "<:lurker:1257490595266560071>"
 
-TRIPLE_GIF="https://tenor.com/view/rodrick-camera-point-rodrick-heffley-diary-of-a-wimpy-kid-gif-13001614153341977897"
+TRIPLE_GIF = "https://tenor.com/view/rodrick-camera-point-rodrick-heffley-diary-of-a-wimpy-kid-gif-13001614153341977897"
 
 CHANNEL = os.getenv("CHANNEL")
-USER_ID = int(os.getenv("USER_ID")) # Ensure USER_ID is an integer
+USER_ID = int(os.getenv("USER_ID"))  # Ensure USER_ID is an integer
 API_URL = os.getenv("API")
-CHANNEL_ID=int(os.getenv("CHANNEL_ID")) # Ensure CHANNEL_ID is an integer
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # Ensure CHANNEL_ID is an integer
 
 CHAT_KEY = os.getenv("CHAT_KEY")
 ALEX_KEY = os.getenv("ALEX_KEY")
@@ -41,9 +41,7 @@ ALEX_KEY = os.getenv("ALEX_KEY")
 # --- Firebase Initialization ---
 try:
     cred = credentials.Certificate(FIREBASE_KEY_PATH)
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': FIREBASE_DB_URL
-    })
+    firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
     print("Firebase Admin SDK initialized successfully.")
 except Exception as e:
     print(f"Error initializing Firebase Admin SDK: {e}")
@@ -68,8 +66,9 @@ user_status = defaultdict(
 # regular_transitions is ephemeral daily data, might not need Firebase persistence
 regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 no_message_data = defaultdict(int)
-audio_counts = {"count": 0} # Simple dict for audio count
+audio_counts = {"count": 0}  # Simple dict for audio count
 show_thinking = True  # Toggle for displaying thinking messages
+
 
 # --- Firebase Data Loading ---
 def load_data_from_firebase():
@@ -77,7 +76,7 @@ def load_data_from_firebase():
     print("Loading data from Firebase...")
     try:
         # Load online times
-        online_times_ref = db.reference('/online_times')
+        online_times_ref = db.reference("/online_times")
         loaded_online_times = online_times_ref.get()
         if loaded_online_times:
             # Convert Firebase data back to nested defaultdict structure if needed
@@ -88,7 +87,7 @@ def load_data_from_firebase():
             print("No existing online times found in Firebase.")
 
         # Load no message data
-        no_message_ref = db.reference('/no_message_data')
+        no_message_ref = db.reference("/no_message_data")
         loaded_no_message = no_message_ref.get()
         if loaded_no_message:
             no_message_data.update(loaded_no_message)
@@ -97,20 +96,21 @@ def load_data_from_firebase():
             print("No existing no-message data found in Firebase.")
 
         # Load audio counts
-        audio_count_ref = db.reference('/audio_counts/count')
+        audio_count_ref = db.reference("/audio_counts/count")
         loaded_audio_count = audio_count_ref.get()
-        if loaded_audio_count is not None: # Check for None explicitly
-             audio_counts["count"] = loaded_audio_count
-             print(f"Loaded audio count: {audio_counts['count']}")
+        if loaded_audio_count is not None:  # Check for None explicitly
+            audio_counts["count"] = loaded_audio_count
+            print(f"Loaded audio count: {audio_counts['count']}")
         else:
-             # Initialize in Firebase if it doesn't exist
-             audio_count_ref.set(0)
-             audio_counts["count"] = 0
-             print("Initialized audio count in Firebase.")
+            # Initialize in Firebase if it doesn't exist
+            audio_count_ref.set(0)
+            audio_counts["count"] = 0
+            print("Initialized audio count in Firebase.")
 
     except Exception as e:
         print(f"Error loading data from Firebase: {e}")
         # Decide how to handle this - continue with empty data, retry, etc.
+
 
 # --- Firebase Data Saving Functions (Replaced JSON saves) ---
 # Note: Firebase keys cannot contain '.', '#', '$', '[', or ']'
@@ -121,30 +121,37 @@ def get_firebase_safe_date(dt=None):
         dt = datetime.now(eastern)
     return dt.strftime("%m-%d-%y")
 
+
 def save_online_time_to_firebase(date_key, detection_key, time_str):
     try:
-        ref = db.reference(f'/online_times/{date_key}/{detection_key}')
+        ref = db.reference(f"/online_times/{date_key}/{detection_key}")
         ref.set(time_str)
     except Exception as e:
         print(f"Error saving online time to Firebase: {e}")
 
+
 def increment_no_message_count_in_firebase(date_key):
     try:
-        ref = db.reference(f'/no_message_data/{date_key}')
+        ref = db.reference(f"/no_message_data/{date_key}")
+
         # Use a transaction for safe incrementing
         def transaction_update(current_value):
             return (current_value or 0) + 1
+
         ref.transaction(transaction_update)
     except Exception as e:
         print(f"Error incrementing no-message count in Firebase: {e}")
 
+
 def increment_audio_count_in_firebase():
     try:
-        ref = db.reference('/audio_counts/count')
+        ref = db.reference("/audio_counts/count")
+
         # Use a transaction for safe incrementing
         def transaction_update(current_value):
             # Ensure current_value is treated as 0 if it's None initially
             return (current_value or 0) + 1
+
         ref.transaction(transaction_update)
         # Update local cache after successful transaction (optional but good practice)
         # Fetch the new value to be certain, though transaction implies success
@@ -161,8 +168,13 @@ def send_prompt(
     prompt, max_length=50, do_sample=True, top_k=50, top_p=0.95, temperature=1.0
 ):
     payload = {
-        "prompt": prompt, "max_length": max_length, "do_sample": do_sample,
-        "top_k": top_k, "top_p": top_p, "temperature": temperature,"key": CHAT_KEY
+        "prompt": prompt,
+        "max_length": max_length,
+        "do_sample": do_sample,
+        "top_k": top_k,
+        "top_p": top_p,
+        "temperature": temperature,
+        "key": CHAT_KEY,
     }
     try:
         response = requests.post(f"{API_URL}/generate", json=payload)
@@ -173,16 +185,19 @@ def send_prompt(
             return f"Error: Received status code {response.status_code}"
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
-        return "Error: Could not connect to the API." # Return error message
-    
+        return "Error: Could not connect to the API."  # Return error message
+
+
 def remove_think_blocks(text):
     cleaned = re.sub(r"<think>[\s\S]*?<\/think>", "", text)
     return cleaned.lstrip("\n")
+
 
 def extract_think_blocks(text):
     """Extract only the text between <think></think> tags."""
     matches = re.findall(r"<think>([\s\S]*?)<\/think>", text)
     return "\n".join(matches).strip() if matches else ""
+
 
 def send_think(prompt):
 
@@ -205,16 +220,15 @@ def send_think(prompt):
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
 
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    load_data_from_firebase() # Load data when bot starts
+    load_data_from_firebase()  # Load data when bot starts
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        await channel.send(
-            f"Fired up and ready to lurk! {LURKER} {LURKIN}"
-        )
+        await channel.send(f"Fired up and ready to lurk! {LURKER} {LURKIN}")
     reset_daily_count.start()
 
 
@@ -222,21 +236,21 @@ async def on_ready():
 async def on_presence_update(before, after):
     # Ensure USER_ID is correctly compared (it's now an int)
     if after.id == USER_ID:
-        today_key = get_firebase_safe_date() # Use Firebase-safe date key
+        today_key = get_firebase_safe_date()  # Use Firebase-safe date key
         current_time_str = datetime.now(eastern).strftime("%H:%M")
 
-        # User goes online
+        # User goes from offline to any status (online, away, do not disturb)
         if (
-            before.status != discord.Status.online
-            and after.status == discord.Status.online
+            before.status == discord.Status.offline
+            and after.status != discord.Status.offline
         ):
             user_status[USER_ID]["online"] = True
             user_status[USER_ID]["message_sent"] = False
-            regular_transitions[today_key]["online"] += 1 # Still track ephemeral daily
+            regular_transitions[today_key]["online"] += 1  # Still track ephemeral daily
 
             # Determine next detection key
             # Fetch current detections for today to find the count
-            today_detections_ref = db.reference(f'/online_times/{today_key}')
+            today_detections_ref = db.reference(f"/online_times/{today_key}")
             current_detections = today_detections_ref.get()
             detection_count = len(current_detections) if current_detections else 0
             detection_key = f"detection{detection_count + 1}"
@@ -246,15 +260,13 @@ async def on_presence_update(before, after):
 
             # Update in-memory cache (important for commands)
             if today_key not in user_online_times:
-                 user_online_times[today_key] = {}
+                user_online_times[today_key] = {}
             user_online_times[today_key][detection_key] = current_time_str
 
             # Send Discord message
             channel = discord.utils.get(after.guild.text_channels, name=CHANNEL)
             if channel:
-                await channel.send(
-                    f"{after.mention} - {detection_count + 1} {LURKIN}"
-                )
+                await channel.send(f"{after.mention} - {detection_count + 1} {LURKIN}")
                 await channel.send(
                     "https://cdn.discordapp.com/attachments/1000447385887051827/1293029673470525450/image.png?ex=6705e339&is=670491b9&hm=4c42945052a9e0de8b959dca888a92d25b215aef14ecf58e5805802cb17474d5&"
                 )
@@ -291,11 +303,16 @@ async def on_message(message):
         try:
             messages = [msg async for msg in message.channel.history(limit=6)]
             messages = [msg for msg in messages if msg.content != TRIPLE_GIF]
-            if len(messages) == 6 and all(msg.author == bot.user and msg.id not in triggered_messages for msg in messages):
+            if len(messages) == 6 and all(
+                msg.author == bot.user and msg.id not in triggered_messages
+                for msg in messages
+            ):
                 await message.channel.send(TRIPLE_GIF)
                 triggered_messages.update(msg.id for msg in messages)
         except discord.errors.Forbidden:
-            print(f"Missing permissions to read history in channel {message.channel.name}")
+            print(
+                f"Missing permissions to read history in channel {message.channel.name}"
+            )
         except Exception as e:
             print(f"Error processing message history: {e}")
 
@@ -304,6 +321,7 @@ async def on_message(message):
 
 # --- Bot Commands ---
 
+
 @bot.command()
 async def audio(ctx):
     if ctx.author.voice:
@@ -311,21 +329,23 @@ async def audio(ctx):
         try:
             voice_client = await voice_channel.connect()
         except discord.errors.ClientException:
-             await ctx.send("Already connected to a voice channel.")
-             return # Avoid error if already connected
+            await ctx.send("Already connected to a voice channel.")
+            return  # Avoid error if already connected
 
         sound_file = AUDIO_FILE
         if not os.path.exists(sound_file):
-             await ctx.send("Audio file not found.")
-             if voice_client.is_connected():
-                 await voice_client.disconnect()
-             return
+            await ctx.send("Audio file not found.")
+            if voice_client.is_connected():
+                await voice_client.disconnect()
+            return
 
         if not voice_client.is_playing():
             try:
                 voice_client.play(
                     discord.FFmpegPCMAudio(sound_file),
-                    after=lambda e: print(f"Finished playing: {e}" if e else "Finished playing audio."),
+                    after=lambda e: print(
+                        f"Finished playing: {e}" if e else "Finished playing audio."
+                    ),
                 )
 
                 while voice_client.is_playing():
@@ -339,7 +359,7 @@ async def audio(ctx):
                 print(f"Error playing audio: {e}")
                 await ctx.send("An error occurred while trying to play the audio.")
             finally:
-                 if voice_client.is_connected():
+                if voice_client.is_connected():
                     await voice_client.disconnect()
 
     else:
@@ -352,14 +372,13 @@ async def audio(ctx):
     name="leaderboard",
     brief="Displays the leaderboard",
     description="Displays the top 5 Alex Detections. Add an optional year to see top 5 for that year.",
-    usage="[year (optional)]"
+    usage="[year (optional)]",
 )
 async def leaderboard(
     ctx,
     year: int = commands.parameter(
-        default=None,
-        description="Optional year to filter leaderboard (e.g., 2024)"
-    )
+        default=None, description="Optional year to filter leaderboard (e.g., 2024)"
+    ),
 ):
     # Data is already loaded into user_online_times at startup
     # If you expect data to change frequently *while the bot is running*
@@ -369,7 +388,7 @@ async def leaderboard(
     # online_times_ref = db.reference('/online_times')
     # current_online_times = online_times_ref.get() or {}
 
-    current_online_times = user_online_times # Use in-memory data
+    current_online_times = user_online_times  # Use in-memory data
 
     if year:
         year_suffix = str(year)[-2:]
@@ -377,7 +396,7 @@ async def leaderboard(
         filtered_days = {
             day: detections
             for day, detections in current_online_times.items()
-            if day.endswith(f"-{year_suffix}") # Check MM-DD-YY
+            if day.endswith(f"-{year_suffix}")  # Check MM-DD-YY
         }
 
         if not filtered_days:
@@ -386,16 +405,20 @@ async def leaderboard(
 
         sorted_days = sorted(
             filtered_days.items(),
-            key=lambda item: len(item[1]) if isinstance(item[1], dict) else 0, # Handle potential non-dict values
-            reverse=True
+            key=lambda item: (
+                len(item[1]) if isinstance(item[1], dict) else 0
+            ),  # Handle potential non-dict values
+            reverse=True,
         )[:5]
 
         message = f"{LURKER} **Top 5 Detection Days for {year}** {LURKIN}\n"
     else:
         sorted_days = sorted(
             current_online_times.items(),
-            key=lambda item: len(item[1]) if isinstance(item[1], dict) else 0, # Handle potential non-dict values
-            reverse=True
+            key=lambda item: (
+                len(item[1]) if isinstance(item[1], dict) else 0
+            ),  # Handle potential non-dict values
+            reverse=True,
         )[:5]
 
         message = f"{LURKER} **Top 5 Detection Days (All Time)** {LURKIN}\n"
@@ -403,7 +426,7 @@ async def leaderboard(
     for i, (day, detections) in enumerate(sorted_days, start=1):
         # Ensure detections is a dict before getting len
         count = len(detections) if isinstance(detections, dict) else 0
-        message += f"{i}. {day} - {count} Alex detections\n" # Use MM-DD-YY
+        message += f"{i}. {day} - {count} Alex detections\n"  # Use MM-DD-YY
 
     await ctx.send(message)
 
@@ -421,11 +444,16 @@ async def chat(
     else:
         # Consider adding async handling if send_prompt takes long
         output = send_prompt(
-            prompt=prompt, max_length=50, do_sample=True,
-            top_k=40, top_p=0.9, temperature=0.7,
+            prompt=prompt,
+            max_length=50,
+            do_sample=True,
+            top_k=40,
+            top_p=0.9,
+            temperature=0.7,
         )
         await ctx.send(output)
-        
+
+
 @bot.command(
     name="think",
     brief="Respond with an attitude like Alex",
@@ -439,22 +467,23 @@ async def think(
     else:
         # Get the full response including think blocks
         full_response = send_think(prompt=prompt)
-        
+
         # Extract thinking text and clean response
         thinking_text = extract_think_blocks(full_response)
         clean_response = remove_think_blocks(full_response)
-        
+
         # Send thinking text first if it exists
         if thinking_text and show_thinking:
             await ctx.send(f"**Thinking:**\n{thinking_text}")
             await ctx.send(f"**-----------------------------------**")
-        
+
         # Send clean response if it exists
         if clean_response:
             await ctx.send(clean_response)
         elif not thinking_text:
             # If neither thinking nor clean response, send the original
             await ctx.send(full_response)
+
 
 @bot.command(
     name="thought",
@@ -467,6 +496,7 @@ async def thought(ctx):
     status = "enabled" if show_thinking else "disabled"
     await ctx.send(f"Thinking messages are now **{status}**.")
 
+
 @bot.command(
     name="alex",
     brief="Displays detections",
@@ -474,18 +504,18 @@ async def thought(ctx):
 )
 async def alex(
     ctx,
-    date_str: str = commands.parameter( # Renamed to date_str for clarity
+    date_str: str = commands.parameter(  # Renamed to date_str for clarity
         default=None,
         description="The date to check (Format: MM-DD-YY)",
     ),
 ):
     if date_str is None:
-        date_key = get_firebase_safe_date() # Get today's key
+        date_key = get_firebase_safe_date()  # Get today's key
     else:
         # Validate format MM-DD-YY
         try:
             datetime.strptime(date_str, "%m-%d-%y")
-            date_key = date_str # Use provided key if valid
+            date_key = date_str  # Use provided key if valid
         except ValueError:
             await ctx.send("Incorrect date format. Please use MM-DD-YY.")
             return
@@ -508,7 +538,7 @@ async def alex(
 )
 async def no_message_count(
     ctx,
-    date_str: str = commands.parameter( # Renamed to date_str
+    date_str: str = commands.parameter(  # Renamed to date_str
         default=None,
         description="The date to check (Format: MM-DD-YY)",
     ),
@@ -525,17 +555,25 @@ async def no_message_count(
             return
 
     # Use in-memory data
-    count = no_message_data.get(date_key, 0) # Default to 0 if not found
+    count = no_message_data.get(date_key, 0)  # Default to 0 if not found
     detections_on_date = user_online_times.get(date_key, {})
-    total_detections = len(detections_on_date) if isinstance(detections_on_date, dict) else 0
+    total_detections = (
+        len(detections_on_date) if isinstance(detections_on_date, dict) else 0
+    )
 
     if total_detections > 0:
-        percentage = round((count / total_detections) * 100, 2) if total_detections > 0 else 0
+        percentage = (
+            round((count / total_detections) * 100, 2) if total_detections > 0 else 0
+        )
         await ctx.send(
             f"{LURKER} Detected {count} non verbal lurks on {date_key} ({percentage}% of {total_detections} detections)"
         )
-    elif count > 0: # Case where there's a no_message count but no detections (unlikely but possible)
-         await ctx.send(f"{LURKER} Detected {count} non verbal lurks on {date_key}, but no corresponding detection entries found.")
+    elif (
+        count > 0
+    ):  # Case where there's a no_message count but no detections (unlikely but possible)
+        await ctx.send(
+            f"{LURKER} Detected {count} non verbal lurks on {date_key}, but no corresponding detection entries found."
+        )
     else:
         await ctx.send(f"No no-message lurks recorded for {date_key}.")
 
@@ -548,7 +586,7 @@ async def no_message_count(
 )
 async def average_time(
     ctx,
-    date_str=commands.parameter( # Renamed to date_str
+    date_str=commands.parameter(  # Renamed to date_str
         default=None,
         description="Specifies which date to get average detections (MM-DD-YY)",
     ),
@@ -568,7 +606,9 @@ async def average_time(
     detections = user_online_times.get(date_key, {})
 
     if not isinstance(detections, dict) or len(detections) < 2:
-        await ctx.send(f"Not enough detections on {date_key} for an average calculation.")
+        await ctx.send(
+            f"Not enough detections on {date_key} for an average calculation."
+        )
         return
 
     # Sort detection times before calculating intervals
@@ -578,26 +618,31 @@ async def average_time(
         times_dt = [datetime.strptime(t, "%H:%M") for t in times_str]
 
         if len(times_dt) < 2:
-             await ctx.send(f"Not enough valid time entries on {date_key} for an average calculation.")
-             return
+            await ctx.send(
+                f"Not enough valid time entries on {date_key} for an average calculation."
+            )
+            return
 
-        intervals = [(times_dt[i + 1] - times_dt[i]).total_seconds() / 60 for i in range(len(times_dt) - 1)]
+        intervals = [
+            (times_dt[i + 1] - times_dt[i]).total_seconds() / 60
+            for i in range(len(times_dt) - 1)
+        ]
 
         # Filter out negative intervals if necessary (e.g., crossing midnight, though unlikely with H:M format)
         intervals = [i for i in intervals if i >= 0]
 
         if not intervals:
-             await ctx.send(f"Could not calculate valid time intervals for {date_key}.")
-             return
+            await ctx.send(f"Could not calculate valid time intervals for {date_key}.")
+            return
 
         avg_interval = sum(intervals) / len(intervals)
         await ctx.send(
             f"Average time between detections on {date_key}: {avg_interval:.2f} minutes"
         )
     except ValueError as e:
-         await ctx.send(f"Error parsing time data for {date_key}: {e}")
+        await ctx.send(f"Error parsing time data for {date_key}: {e}")
     except Exception as e:
-         await ctx.send(f"An unexpected error occurred during average calculation: {e}")
+        await ctx.send(f"An unexpected error occurred during average calculation: {e}")
 
 
 @bot.command(
@@ -624,10 +669,12 @@ async def graph_detections(
     counts = []
     for i in range(days):
         current_date = end_date - timedelta(days=i)
-        date_key = get_firebase_safe_date(current_date) # Get MM-DD-YY key
+        date_key = get_firebase_safe_date(current_date)  # Get MM-DD-YY key
         dates_keys.append(date_key)
         detections_on_date = current_online_times.get(date_key, {})
-        counts.append(len(detections_on_date) if isinstance(detections_on_date, dict) else 0)
+        counts.append(
+            len(detections_on_date) if isinstance(detections_on_date, dict) else 0
+        )
 
     # Reverse lists to plot chronologically
     dates_keys.reverse()
@@ -639,12 +686,12 @@ async def graph_detections(
     plt.title(f"Detections Over the Past {days} Days")
     plt.xlabel("Date (MM-DD-YY)")
     plt.ylabel("Detections")
-    plt.tight_layout() # Adjust layout
+    plt.tight_layout()  # Adjust layout
 
     buf = io.BytesIO()
     plt.savefig(buf, format="png")
     buf.seek(0)
-    plt.close() # Close plot to free memory
+    plt.close()  # Close plot to free memory
 
     await ctx.send(file=discord.File(buf, "detections.png"))
     buf.close()
@@ -659,7 +706,7 @@ async def graph_detections(
 async def graphhourly(ctx, start_date_str: str = None, end_date_str: str = None):
     # Use Firebase-safe default date
     default_start_date_key = "11-01-24"
-    default_end_date_key = get_firebase_safe_date() # Today
+    default_end_date_key = get_firebase_safe_date()  # Today
 
     # Parse input dates (expecting MM-DD-YY)
     try:
@@ -690,16 +737,17 @@ async def graphhourly(ctx, start_date_str: str = None, end_date_str: str = None)
         date_key = get_firebase_safe_date(current_dt)
         if date_key in current_online_times:
             detections = current_online_times[date_key]
-            if isinstance(detections, dict): # Ensure it's a dictionary
+            if isinstance(detections, dict):  # Ensure it's a dictionary
                 total_days_in_range += 1
                 for time_str in detections.values():
                     try:
                         hour = datetime.strptime(time_str, "%H:%M").hour
                         hourly_counts[hour] += 1
                     except ValueError:
-                        print(f"Skipping invalid time format '{time_str}' on date {date_key}")
+                        print(
+                            f"Skipping invalid time format '{time_str}' on date {date_key}"
+                        )
         current_dt += timedelta(days=1)
-
 
     if total_days_in_range == 0:
         await ctx.send(
@@ -708,16 +756,18 @@ async def graphhourly(ctx, start_date_str: str = None, end_date_str: str = None)
         return
 
     # Calculate average detections per hour
-    average_detections = [hourly_counts[hour] / total_days_in_range for hour in range(24)]
+    average_detections = [
+        hourly_counts[hour] / total_days_in_range for hour in range(24)
+    ]
 
     # Plotting
-    plt.figure(figsize=(12, 6)) # Slightly wider figure
+    plt.figure(figsize=(12, 6))  # Slightly wider figure
     plt.bar(range(24), average_detections, color="teal", alpha=0.7, edgecolor="black")
-    plt.xticks(range(24)) # Ensure all hours are labeled
+    plt.xticks(range(24))  # Ensure all hours are labeled
     plt.title(f"Average Detections Per Hour ({start_date_key} - {end_date_key})")
     plt.xlabel("Hour of the Day (EST)")
     plt.ylabel("Average Detections")
-    plt.grid(axis='y', linestyle='--', alpha=0.6) # Add horizontal grid lines
+    plt.grid(axis="y", linestyle="--", alpha=0.6)  # Add horizontal grid lines
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -732,7 +782,7 @@ async def graphhourly(ctx, start_date_str: str = None, end_date_str: str = None)
 # --- Tasks ---
 @tasks.loop(time=time(0, 0, tzinfo=eastern))
 async def reset_daily_count():
-    today_key = get_firebase_safe_date() # Use MM-DD-YY
+    today_key = get_firebase_safe_date()  # Use MM-DD-YY
     print(f"Performing daily reset tasks for {today_key}")
     # Reset ephemeral in-memory transition counts
     regular_transitions.clear()
@@ -749,7 +799,18 @@ async def reset_daily_count():
 
 # --- Run Bot ---
 if __name__ == "__main__":
-    if not all([BOT_TOKEN, CHANNEL, USER_ID, API_URL, CHANNEL_ID, FIREBASE_KEY_PATH, FIREBASE_DB_URL, AUDIO_FILE]):
+    if not all(
+        [
+            BOT_TOKEN,
+            CHANNEL,
+            USER_ID,
+            API_URL,
+            CHANNEL_ID,
+            FIREBASE_KEY_PATH,
+            FIREBASE_DB_URL,
+            AUDIO_FILE,
+        ]
+    ):
         print("Error: Missing one or more required environment variables.")
         exit()
     if not os.path.exists(FIREBASE_KEY_PATH):
