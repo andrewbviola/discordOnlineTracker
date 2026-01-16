@@ -230,7 +230,7 @@ def send_ask(prompt):
 
     try:
         # Send the POST request
-        response = requests.post(f"{API_URL}/ask", json=payload, timeout=300)
+        response = requests.post(f"{API_URL}/ask", json=payload, timeout=1000)
 
         # Check if the response is successful
         if response.status_code == 200:
@@ -474,37 +474,6 @@ async def chat(
             temperature=0.7,
         )
         await ctx.send(output)
-
-
-@bot.command(
-    name="think",
-    brief="Respond with an attitude like Alex",
-    description="Responds with a message that was trained to sound like Alex",
-)
-async def think(
-    ctx, *, prompt: str = commands.parameter(default=None, description="A prompt")
-):
-    if prompt is None:
-        await ctx.send("No prompt")
-    else:
-        # Get the full response including think blocks
-        full_response = send_think(prompt=prompt)
-
-        # Extract thinking text and clean response
-        thinking_text = extract_think_blocks(full_response)
-        clean_response = remove_think_blocks(full_response)
-
-        # Send thinking text first if it exists
-        if thinking_text and show_thinking:
-            await ctx.send(f"**Thinking:**\n{thinking_text}")
-            await ctx.send(f"**-----------------------------------**")
-
-        # Send clean response if it exists
-        if clean_response:
-            await ctx.send(clean_response)
-        elif not thinking_text:
-            # If neither thinking nor clean response, send the original
-            await ctx.send(full_response)
 
 
 @bot.command(
