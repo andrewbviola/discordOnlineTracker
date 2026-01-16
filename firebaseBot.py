@@ -530,17 +530,6 @@ async def ask(
                 except Exception:
                     ref_msg = None
 
-        recent_msgs = []
-        try:
-            async for msg in ctx.channel.history(limit=8):
-                if msg.id == ctx.message.id:
-                    continue
-                if msg.author.bot and msg.id != getattr(ref_msg, "id", None):
-                    continue
-                recent_msgs.append(msg)
-        except Exception:
-            recent_msgs = []
-
         if ref_msg:
             if ref_msg.content:
                 context_lines.append(f"Replying to: {ref_msg.content}")
@@ -553,15 +542,6 @@ async def ask(
                     mention_names.append(name)
             if mention_names:
                 context_lines.append("Previous mentions: " + ", ".join(mention_names))
-
-        if recent_msgs:
-            context_lines.append("Recent messages:")
-            for msg in reversed(recent_msgs):
-                author_name = getattr(msg.author, "display_name", None) or getattr(
-                    msg.author, "name", "Unknown"
-                )
-                if msg.content:
-                    context_lines.append(f"{author_name}: {msg.content}")
 
         prompt_with_context = prompt
         if context_lines:
