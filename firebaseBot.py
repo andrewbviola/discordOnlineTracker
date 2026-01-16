@@ -68,6 +68,7 @@ regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 no_message_data = defaultdict(int)
 audio_counts = {"count": 0}  # Simple dict for audio count
 show_thinking = True  # Toggle for displaying thinking messages
+tracking_enabled = True  # Toggle for online tracking
 
 
 # --- Firebase Data Loading ---
@@ -221,11 +222,12 @@ def send_think(prompt):
         print(f"Request failed: {e}")
 
 
-def send_ask(prompt):
+def send_ask(prompt, user_id):
 
     payload = {
         "key": ALEX_KEY,
         "prompt": prompt,
+        "user_id": str(user_id),
     }
 
     try:
@@ -256,6 +258,10 @@ async def on_ready():
 
 @bot.event
 async def on_presence_update(before, after):
+    # Skip tracking if disabled
+    if not tracking_enabled:
+        return
+    
     # Ensure USER_ID is correctly compared (it's now an int)
     if after.id == USER_ID:
         today_key = get_firebase_safe_date()  # Use Firebase-safe date key
@@ -489,6 +495,18 @@ async def thought(ctx):
 
 
 @bot.command(
+    name="tracking",
+    brief="Toggle online tracking",
+    description="Toggles whether online presence tracking is enabled",
+)
+async def tracking(ctx):
+    global tracking_enabled
+    tracking_enabled = not tracking_enabled
+    status = "enabled" if tracking_enabled else "disabled"
+    await ctx.send(f"Online tracking is now **{status}**.")
+
+
+@bot.command(
     name="ask",
     brief="Ask a question and get a response",
     description="Sends a prompt to the /ask endpoint and returns the response",
@@ -502,7 +520,7 @@ async def ask(
         # Show typing indicator while generating response
         async with ctx.typing():
             # Run the blocking request in a thread to not block the event loop
-            response = await asyncio.to_thread(send_ask, prompt)
+            response = await asyncio.to_thread(send_ask, prompt, ctx.author.id)
         
         if response:
             # Discord has a 2000 character limit per message
