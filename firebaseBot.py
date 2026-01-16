@@ -517,44 +517,10 @@ async def ask(
     if prompt is None:
         await ctx.send("No prompt")
     else:
-        context_lines = []
-        ref_msg = None
-        if ctx.message.reference:
-            if ctx.message.reference.resolved:
-                ref_msg = ctx.message.reference.resolved
-            else:
-                try:
-                    ref_msg = await ctx.channel.fetch_message(
-                        ctx.message.reference.message_id
-                    )
-                except Exception:
-                    ref_msg = None
-
-        if ref_msg:
-            if ref_msg.content:
-                context_lines.append(f"Replying to: {ref_msg.content}")
-            mention_names = []
-            for mention in ref_msg.mentions + ctx.message.mentions:
-                name = getattr(mention, "display_name", None) or getattr(
-                    mention, "name", None
-                )
-                if name and name not in mention_names:
-                    mention_names.append(name)
-            if mention_names:
-                context_lines.append("Previous mentions: " + ", ".join(mention_names))
-
-        prompt_with_context = prompt
-        if context_lines:
-            prompt_with_context = (
-                "Context:\n" + "\n".join(context_lines) + "\n\n" + prompt
-            )
-
         # Show typing indicator while generating response
         async with ctx.typing():
             # Run the blocking request in a thread to not block the event loop
-            response = await asyncio.to_thread(
-                send_ask, prompt_with_context, ctx.author.id
-            )
+            response = await asyncio.to_thread(send_ask, prompt, ctx.author.id)
 
         if response:
             # Discord has a 2000 character limit per message
