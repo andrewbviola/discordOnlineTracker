@@ -505,7 +505,12 @@ async def ask(
             response = await asyncio.to_thread(send_ask, prompt)
         
         if response:
-            await ctx.send(response)
+            # Discord has a 2000 character limit per message
+            # Split long responses into multiple messages
+            max_length = 2000
+            for i in range(0, len(response), max_length):
+                chunk = response[i:i + max_length]
+                await ctx.send(chunk)
         else:
             await ctx.send("No response received from the API.")
 
