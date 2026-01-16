@@ -221,6 +221,28 @@ def send_think(prompt):
         print(f"Request failed: {e}")
 
 
+def send_ask(prompt):
+
+    payload = {
+        "key": ALEX_KEY,
+        "prompt": prompt,
+    }
+
+    try:
+        # Send the POST request
+        response = requests.post(f"{API_URL}/ask", json=payload, timeout=300)
+
+        # Check if the response is successful
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("response", "No response field found")
+        else:
+            return f"Error: Received status code {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        return "Error: Could not connect to the API."
+
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
@@ -495,6 +517,28 @@ async def thought(ctx):
     show_thinking = not show_thinking
     status = "enabled" if show_thinking else "disabled"
     await ctx.send(f"Thinking messages are now **{status}**.")
+
+
+@bot.command(
+    name="ask",
+    brief="Ask a question and get a response",
+    description="Sends a prompt to the /ask endpoint and returns the response",
+)
+async def ask(
+    ctx, *, prompt: str = commands.parameter(default=None, description="A prompt")
+):
+    if prompt is None:
+        await ctx.send("No prompt")
+    else:
+        # Show typing indicator while generating response
+        async with ctx.typing():
+            # Run the blocking request in a thread to not block the event loop
+            response = await asyncio.to_thread(send_ask, prompt)
+        
+        if response:
+            await ctx.send(response)
+        else:
+            await ctx.send("No response received from the API.")
 
 
 @bot.command(
