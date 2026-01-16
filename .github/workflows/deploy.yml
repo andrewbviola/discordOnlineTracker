@@ -23,7 +23,7 @@ jobs:
           script: |
             # Navigate to the bot directory on the server
             # Make sure this path is correct!
-            cd /home/${{ secrets.SSH_USER }}/discord-bot
+            cd /home/${{ secrets.SSH_USER }}/discordOnlineTracker
 
             # Pull the latest changes from the main branch
             git checkout main # Ensure we are on the main branch
