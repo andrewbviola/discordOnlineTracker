@@ -261,7 +261,7 @@ async def on_presence_update(before, after):
     # Skip tracking if disabled
     if not tracking_enabled:
         return
-    
+
     # Ensure USER_ID is correctly compared (it's now an int)
     if after.id == USER_ID:
         today_key = get_firebase_safe_date()  # Use Firebase-safe date key
@@ -517,17 +517,71 @@ async def ask(
     if prompt is None:
         await ctx.send("No prompt")
     else:
+        context_lines = []
+        ref_msg = None
+        if ctx.message.reference:
+            if ctx.message.reference.resolved:
+                ref_msg = ctx.message.reference.resolved
+            else:
+                try:
+                    ref_msg = await ctx.channel.fetch_message(
+                        ctx.message.reference.message_id
+                    )
+                except Exception:
+                    ref_msg = None
+
+        recent_msgs = []
+        try:
+            async for msg in ctx.channel.history(limit=8):
+                if msg.id == ctx.message.id:
+                    continue
+                if msg.author.bot and msg.id != getattr(ref_msg, "id", None):
+                    continue
+                recent_msgs.append(msg)
+        except Exception:
+            recent_msgs = []
+
+        if ref_msg:
+            if ref_msg.content:
+                context_lines.append(f"Replying to: {ref_msg.content}")
+            mention_names = []
+            for mention in ref_msg.mentions + ctx.message.mentions:
+                name = getattr(mention, "display_name", None) or getattr(
+                    mention, "name", None
+                )
+                if name and name not in mention_names:
+                    mention_names.append(name)
+            if mention_names:
+                context_lines.append("Previous mentions: " + ", ".join(mention_names))
+
+        if recent_msgs:
+            context_lines.append("Recent messages:")
+            for msg in reversed(recent_msgs):
+                author_name = getattr(msg.author, "display_name", None) or getattr(
+                    msg.author, "name", "Unknown"
+                )
+                if msg.content:
+                    context_lines.append(f"{author_name}: {msg.content}")
+
+        prompt_with_context = prompt
+        if context_lines:
+            prompt_with_context = (
+                "Context:\n" + "\n".join(context_lines) + "\n\n" + prompt
+            )
+
         # Show typing indicator while generating response
         async with ctx.typing():
             # Run the blocking request in a thread to not block the event loop
-            response = await asyncio.to_thread(send_ask, prompt, ctx.author.id)
-        
+            response = await asyncio.to_thread(
+                send_ask, prompt_with_context, ctx.author.id
+            )
+
         if response:
             # Discord has a 2000 character limit per message
             # Split long responses into multiple messages
             max_length = 2000
             for i in range(0, len(response), max_length):
-                chunk = response[i:i + max_length]
+                chunk = response[i : i + max_length]
                 await ctx.send(chunk)
         else:
             await ctx.send("No response received from the API.")
