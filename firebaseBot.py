@@ -37,6 +37,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # Ensure CHANNEL_ID is an integer
 
 CHAT_KEY = os.getenv("CHAT_KEY")
 ALEX_KEY = os.getenv("ALEX_KEY")
+TTS_MAX_CHARS = 300
 
 # --- Firebase Initialization ---
 try:
@@ -397,6 +398,106 @@ async def audio(ctx):
 
 
 @bot.command(
+    name="tts",
+    brief="Text-to-speech in voice channel",
+    description="Generates TTS audio using Alex's voice and plays it in your voice channel. 300 character limit.",
+    usage="<text>",
+)
+async def tts(
+    ctx,
+    *,
+    text: str = commands.parameter(default=None, description="Text to convert to speech (max 300 chars)"),
+):
+    if text is None:
+        await ctx.send("Please provide some text to convert to speech.")
+        return
+
+    if len(text) > TTS_MAX_CHARS:
+        await ctx.send(f"Text is too long! Maximum {TTS_MAX_CHARS} characters allowed. Your text: {len(text)} characters.")
+        return
+
+    if not ctx.author.voice:
+        await ctx.send("You need to be in a voice channel to use this command.")
+        return
+
+    voice_channel = ctx.author.voice.channel
+
+    # Send initial message
+    status_msg = await ctx.send(f"🎙️ Generating TTS... (this may take ~30 seconds)")
+    
+    temp_audio_path = "tts_temp_output.wav"
+    voice_client = None
+
+    try:
+        # Request TTS from the Flask server
+        payload = {
+            "key": ALEX_KEY,
+            "text": text,
+        }
+
+        # Run the blocking request in a thread
+        response = await asyncio.to_thread(
+            lambda: requests.post(f"{API_URL}/tts", json=payload, timeout=120)
+        )
+
+        if response.status_code != 200:
+            error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            error_msg = error_data.get("error", f"HTTP {response.status_code}")
+            await status_msg.edit(content=f"❌ TTS generation failed: {error_msg}")
+            return
+
+        # Save the audio to a temporary file
+        with open(temp_audio_path, "wb") as f:
+            f.write(response.content)
+
+        await status_msg.edit(content="🔊 Joining voice channel and playing audio...")
+
+        # Connect to voice channel
+        try:
+            voice_client = await voice_channel.connect()
+        except discord.errors.ClientException:
+            # Already connected, get the existing voice client
+            voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+            if voice_client and voice_client.channel != voice_channel:
+                await voice_client.move_to(voice_channel)
+
+        if not voice_client:
+            await status_msg.edit(content="❌ Failed to connect to voice channel.")
+            return
+
+        # Play the audio
+        if not voice_client.is_playing():
+            voice_client.play(
+                discord.FFmpegPCMAudio(temp_audio_path),
+                after=lambda e: print(f"TTS playback finished: {e}" if e else "TTS playback finished."),
+            )
+
+            while voice_client.is_playing():
+                await asyncio.sleep(1)
+
+            await status_msg.edit(content="✅ TTS playback complete!")
+        else:
+            await status_msg.edit(content="❌ Audio is already playing. Please wait.")
+
+    except requests.exceptions.Timeout:
+        await status_msg.edit(content="❌ TTS generation timed out. Please try again with shorter text.")
+    except requests.exceptions.RequestException as e:
+        await status_msg.edit(content=f"❌ Failed to connect to TTS server: {str(e)}")
+    except Exception as e:
+        print(f"TTS command error: {e}")
+        await status_msg.edit(content=f"❌ An error occurred: {str(e)}")
+    finally:
+        # Always disconnect from voice channel
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect()
+        
+        # Always clean up temp file
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+            print(f"Cleaned up temp TTS file: {temp_audio_path}")
+
+
+@bot.command(
     name="leaderboard",
     brief="Displays the leaderboard",
     description="Displays the top 5 Alex Detections. Add an optional year to see top 5 for that year.",
@@ -521,7 +622,7 @@ async def ask(
         async with ctx.typing():
             # Run the blocking request in a thread to not block the event loop
             response = await asyncio.to_thread(send_ask, prompt, ctx.author.id)
-
+        
         if response:
             # Discord has a 2000 character limit per message
             # Split long responses into multiple messages
