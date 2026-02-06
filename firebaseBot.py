@@ -240,6 +240,14 @@ def send_ask(prompt, user_id):
             data = response.json()
             return data.get("response", "No response field found")
         else:
+            detail = ""
+            try:
+                data = response.json()
+                detail = data.get("error") or data.get("message") or str(data)
+            except ValueError:
+                detail = (response.text or "").strip()
+            if detail:
+                return f"Error {response.status_code}: {detail}"
             return f"Error: Received status code {response.status_code}"
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
