@@ -853,33 +853,57 @@ async def fact(
 
 @bot.command(
     name="factcount",
-    brief="Show fact-check score",
-    description="Shows how many true and false facts a user has. Mention a user or use without arguments for yourself.",
-    usage="[@user (optional)]",
+    brief="Show fact-check leaderboard",
+    description="Displays a leaderboard of everyone's fact-check stats, sorted by accuracy.",
 )
-async def factcount(ctx, member: discord.Member = None):
-    if member is None:
-        member = ctx.author
-
-    user_id = str(member.id)
-    user_facts = fact_counts.get(user_id, {"true": 0, "false": 0})
-    true_count = user_facts.get("true", 0)
-    false_count = user_facts.get("false", 0)
-    total = true_count + false_count
-
-    if total == 0:
-        await ctx.send(f"📊 **{member.display_name}** has no fact-checked messages yet.")
+async def factcount(ctx):
+    if not fact_counts:
+        await ctx.send("📊 No fact-checked messages yet.")
         return
 
-    accuracy = round((true_count / total) * 100, 1) if total > 0 else 0
-    reply = (
-        f"📊 **{member.display_name}'s Fact Score:**\n"
-        f"✅ True: {true_count}\n"
-        f"❌ False: {false_count}\n"
-        f"📝 Total checked: {total}\n"
-        f"🎯 Accuracy: {accuracy}%"
-    )
-    await ctx.send(reply)
+    # Build rows: resolve each user ID to a display name
+    rows = []
+    for user_id, counts in fact_counts.items():
+        true_ct = counts.get("true", 0)
+        false_ct = counts.get("false", 0)
+        total = true_ct + false_ct
+        if total == 0:
+            continue
+
+        accuracy = round((true_ct / total) * 100, 1)
+
+        # Try to resolve the user ID to a guild member name
+        member = ctx.guild.get_member(int(user_id)) if ctx.guild else None
+        name = member.display_name if member else f"User {user_id}"
+
+        rows.append((name, true_ct, false_ct, total, accuracy))
+
+    if not rows:
+        await ctx.send("📊 No fact-checked messages yet.")
+        return
+
+    # Sort by accuracy descending, then by total checks descending
+    rows.sort(key=lambda r: (r[4], r[3]), reverse=True)
+
+    # Figure out column widths for alignment
+    name_w = max(len(r[0]) for r in rows)
+    name_w = max(name_w, 4)  # min width for "Name"
+
+    # Build the table
+    header = f"{'Name':<{name_w}}  ✅True  ❌False  📝Total  🎯Accuracy"
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for name, true_ct, false_ct, total, accuracy in rows:
+        lines.append(
+            f"{name:<{name_w}}  {true_ct:>4}    {false_ct:>5}    {total:>5}    {accuracy:>6.1f}%"
+        )
+
+    reply = f"📊 **Fact-Check Leaderboard**\n```\n" + "\n".join(lines) + "\n```"
+
+    max_length = 2000
+    for i in range(0, len(reply), max_length):
+        chunk = reply[i : i + max_length]
+        await ctx.send(chunk)
 
 
 @bot.command(
