@@ -68,6 +68,7 @@ user_status = defaultdict(
 regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 no_message_data = defaultdict(int)
 audio_counts = {"count": 0}  # Simple dict for audio count
+fact_counts = {}  # {user_id_str: {"true": N, "false": N}}
 show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
 
@@ -108,6 +109,15 @@ def load_data_from_firebase():
             audio_count_ref.set(0)
             audio_counts["count"] = 0
             print("Initialized audio count in Firebase.")
+
+        # Load fact counts
+        fact_counts_ref = db.reference("/fact_counts")
+        loaded_fact_counts = fact_counts_ref.get()
+        if loaded_fact_counts:
+            fact_counts.update(loaded_fact_counts)
+            print(f"Loaded fact counts for {len(fact_counts)} users.")
+        else:
+            print("No existing fact counts found in Firebase.")
 
     except Exception as e:
         print(f"Error loading data from Firebase: {e}")
@@ -163,6 +173,27 @@ def increment_audio_count_in_firebase():
 
     except Exception as e:
         print(f"Error incrementing audio count in Firebase: {e}")
+
+
+def update_fact_count_in_firebase(user_id: str, verdict: str):
+    """Increment true or false fact count for a user in Firebase."""
+    try:
+        if verdict not in ("true", "false"):
+            return
+        ref = db.reference(f"/fact_counts/{user_id}/{verdict}")
+
+        def transaction_update(current_value):
+            return (current_value or 0) + 1
+
+        ref.transaction(transaction_update)
+
+        # Update local cache
+        if user_id not in fact_counts:
+            fact_counts[user_id] = {"true": 0, "false": 0}
+        fact_counts[user_id][verdict] = fact_counts[user_id].get(verdict, 0) + 1
+
+    except Exception as e:
+        print(f"Error updating fact count in Firebase: {e}")
 
 
 # --- API Call Function (Unchanged) ---
@@ -640,6 +671,184 @@ async def ask(
                 await ctx.send(chunk)
         else:
             await ctx.send("No response received from the API.")
+
+
+def send_fact_check(target_message, context_messages):
+    """Send a fact-check request to the /fact endpoint."""
+    payload = {
+        "key": ALEX_KEY,
+        "target_message": target_message,
+        "context_messages": context_messages,
+    }
+    try:
+        response = requests.post(f"{API_URL}/fact", json=payload, timeout=120)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("response", "No response field found")
+        else:
+            return f"Error: Received status code {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        print(f"Fact check request failed: {e}")
+        return "Error: Could not connect to the API."
+
+
+@bot.command(
+    name="fact",
+    brief="Fact-check a message",
+    description="Reply to a message with !fact to fact-check it using AI with web search. Optionally add extra instructions after the command.",
+)
+async def fact(ctx):
+    # Must be a reply to another message
+    if not ctx.message.reference or not ctx.message.reference.message_id:
+        await ctx.send("You need to reply to a message to fact-check it!")
+        return
+
+    # Fetch the replied-to message
+    try:
+        target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+    except discord.NotFound:
+        await ctx.send("Could not find the referenced message.")
+        return
+
+    if not target_msg.content:
+        await ctx.send("The referenced message has no text content to fact-check.")
+        return
+
+    # Gather +/- 2 messages around the target for context
+    context_messages = []
+    try:
+        # 2 messages before the target (returned newest-first, so reverse)
+        before_msgs = []
+        async for msg in ctx.channel.history(limit=2, before=target_msg):
+            before_msgs.append(msg)
+        before_msgs.reverse()
+
+        # 2 messages after the target (returned oldest-first with after+oldest_first)
+        after_msgs = []
+        async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
+            after_msgs.append(msg)
+
+        # Build context: before → target → after
+        for msg in before_msgs:
+            context_messages.append({
+                "author": msg.author.display_name,
+                "content": msg.content,
+            })
+
+        context_messages.append({
+            "author": target_msg.author.display_name,
+            "content": target_msg.content,
+            "is_target": True,
+        })
+
+        for msg in after_msgs:
+            # Don't include the !fact command message itself as context
+            if msg.id == ctx.message.id:
+                continue
+            context_messages.append({
+                "author": msg.author.display_name,
+                "content": msg.content,
+            })
+
+    except Exception as e:
+        print(f"Error fetching context messages: {e}")
+
+    # Show typing indicator while waiting for the API
+    async with ctx.typing():
+        response = await asyncio.to_thread(
+            send_fact_check, target_msg.content, context_messages
+        )
+
+    if not response or response.startswith("Error"):
+        await ctx.send(f"Could not complete the fact check. {response}")
+        return
+
+    # Parse the JSON verdict from the model
+    try:
+        cleaned = response.strip()
+        # Strip markdown code fences if the model wrapped them
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+        result = json.loads(cleaned)
+        verdict = result.get("verdict", "unknown").lower()
+        explanation = result.get("explanation", "No explanation provided.")
+        correction = result.get("correction")
+
+        # Update fact count for the *author of the original message*
+        author_id = str(target_msg.author.id)
+        if verdict in ("true", "false"):
+            update_fact_count_in_firebase(author_id, verdict)
+        elif verdict == "partially_true":
+            update_fact_count_in_firebase(author_id, "false")
+
+        # Format the Discord reply
+        if verdict == "true":
+            emoji = "✅"
+            verdict_text = "TRUE"
+        elif verdict == "false":
+            emoji = "❌"
+            verdict_text = "FALSE"
+        elif verdict == "partially_true":
+            emoji = "⚠️"
+            verdict_text = "PARTIALLY TRUE"
+        else:
+            emoji = "❓"
+            verdict_text = "UNKNOWN"
+
+        reply = f"{emoji} **Verdict: {verdict_text}**\n\n{explanation}"
+        if correction:
+            reply += f"\n\n**Correction:** {correction}"
+
+        # Append the author's running fact score
+        user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
+        true_ct = user_facts.get("true", 0)
+        false_ct = user_facts.get("false", 0)
+        reply += f"\n\n📊 **{target_msg.author.display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
+
+    except (json.JSONDecodeError, KeyError):
+        # If JSON parsing fails, just show the raw model response
+        reply = response
+
+    # Discord 2000-char limit — split if needed
+    max_length = 2000
+    for i in range(0, len(reply), max_length):
+        chunk = reply[i : i + max_length]
+        await ctx.send(chunk)
+
+
+@bot.command(
+    name="factcount",
+    brief="Show fact-check score",
+    description="Shows how many true and false facts a user has. Mention a user or use without arguments for yourself.",
+    usage="[@user (optional)]",
+)
+async def factcount(ctx, member: discord.Member = None):
+    if member is None:
+        member = ctx.author
+
+    user_id = str(member.id)
+    user_facts = fact_counts.get(user_id, {"true": 0, "false": 0})
+    true_count = user_facts.get("true", 0)
+    false_count = user_facts.get("false", 0)
+    total = true_count + false_count
+
+    if total == 0:
+        await ctx.send(f"📊 **{member.display_name}** has no fact-checked messages yet.")
+        return
+
+    accuracy = round((true_count / total) * 100, 1) if total > 0 else 0
+    reply = (
+        f"📊 **{member.display_name}'s Fact Score:**\n"
+        f"✅ True: {true_count}\n"
+        f"❌ False: {false_count}\n"
+        f"📝 Total checked: {total}\n"
+        f"🎯 Accuracy: {accuracy}%"
+    )
+    await ctx.send(reply)
 
 
 @bot.command(
