@@ -674,7 +674,9 @@ async def ask(
 
 
 def send_fact_check(target_message, context_messages):
-    """Send a fact-check request to the /fact endpoint."""
+    """Send a fact-check request to the /fact endpoint.
+    Returns a dict with 'response' (str) and 'searches' (list of str).
+    """
     payload = {
         "key": ALEX_KEY,
         "target_message": target_message,
@@ -684,12 +686,15 @@ def send_fact_check(target_message, context_messages):
         response = requests.post(f"{API_URL}/fact", json=payload, timeout=120)
         if response.status_code == 200:
             data = response.json()
-            return data.get("response", "No response field found")
+            return {
+                "response": data.get("response", "No response field found"),
+                "searches": data.get("searches", []),
+            }
         else:
-            return f"Error: Received status code {response.status_code}"
+            return {"response": f"Error: Received status code {response.status_code}", "searches": []}
     except requests.exceptions.RequestException as e:
         print(f"Fact check request failed: {e}")
-        return "Error: Could not connect to the API."
+        return {"response": "Error: Could not connect to the API.", "searches": []}
 
 
 @bot.command(
@@ -768,9 +773,12 @@ async def fact(
 
     # Show typing indicator while waiting for the API
     async with ctx.typing():
-        response = await asyncio.to_thread(
+        fact_result = await asyncio.to_thread(
             send_fact_check, target_text, context_messages
         )
+
+    response = fact_result.get("response", "")
+    searches = fact_result.get("searches", [])
 
     if not response or response.startswith("Error"):
         await ctx.send(f"Could not complete the fact check. {response}")
@@ -816,6 +824,13 @@ async def fact(
         reply = f"{emoji} **Verdict: {verdict_text}**\n\n{explanation}"
         if correction:
             reply += f"\n\n**Correction:** {correction}"
+
+        # Show whether online sources were used
+        if searches:
+            search_list = ", ".join(f'"{s}"' for s in searches)
+            reply += f"\n\n🌐 **Sources:** Searched the web for {search_list}"
+        else:
+            reply += "\n\n📖 **Sources:** Answered from general knowledge (no web search used)"
 
         # Append the author's running fact score
         if author_id:
