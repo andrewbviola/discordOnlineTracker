@@ -694,69 +694,82 @@ def send_fact_check(target_message, context_messages):
 
 @bot.command(
     name="fact",
-    brief="Fact-check a message",
-    description="Reply to a message with !fact to fact-check it using AI with web search. Optionally add extra instructions after the command.",
+    brief="Fact-check a message or question",
+    description="Reply to a message with !fact to fact-check it, or use !fact <question/claim> to ask or verify something directly.",
+    usage="[question or claim (optional if replying)]",
 )
-async def fact(ctx):
-    # Must be a reply to another message
-    if not ctx.message.reference or not ctx.message.reference.message_id:
-        await ctx.send("You need to reply to a message to fact-check it!")
-        return
-
-    # Fetch the replied-to message
-    try:
-        target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-    except discord.NotFound:
-        await ctx.send("Could not find the referenced message.")
-        return
-
-    if not target_msg.content:
-        await ctx.send("The referenced message has no text content to fact-check.")
-        return
-
-    # Gather +/- 2 messages around the target for context
+async def fact(
+    ctx,
+    *,
+    query: str = commands.parameter(default=None, description="A question or claim to fact-check"),
+):
+    is_reply = ctx.message.reference and ctx.message.reference.message_id
+    target_text = None
+    target_author = None  # discord.Member or None
     context_messages = []
-    try:
-        # 2 messages before the target (returned newest-first, so reverse)
-        before_msgs = []
-        async for msg in ctx.channel.history(limit=2, before=target_msg):
-            before_msgs.append(msg)
-        before_msgs.reverse()
 
-        # 2 messages after the target (returned oldest-first with after+oldest_first)
-        after_msgs = []
-        async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
-            after_msgs.append(msg)
+    if is_reply:
+        # --- Mode 1: reply to a message ---
+        try:
+            target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        except discord.NotFound:
+            await ctx.send("Could not find the referenced message.")
+            return
 
-        # Build context: before → target → after
-        for msg in before_msgs:
+        if not target_msg.content:
+            await ctx.send("The referenced message has no text content to fact-check.")
+            return
+
+        target_text = target_msg.content
+        target_author = target_msg.author
+
+        # Gather +/- 2 messages around the target for context
+        try:
+            before_msgs = []
+            async for msg in ctx.channel.history(limit=2, before=target_msg):
+                before_msgs.append(msg)
+            before_msgs.reverse()
+
+            after_msgs = []
+            async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
+                after_msgs.append(msg)
+
+            for msg in before_msgs:
+                context_messages.append({
+                    "author": msg.author.display_name,
+                    "content": msg.content,
+                })
+
             context_messages.append({
-                "author": msg.author.display_name,
-                "content": msg.content,
+                "author": target_msg.author.display_name,
+                "content": target_msg.content,
+                "is_target": True,
             })
 
-        context_messages.append({
-            "author": target_msg.author.display_name,
-            "content": target_msg.content,
-            "is_target": True,
-        })
+            for msg in after_msgs:
+                if msg.id == ctx.message.id:
+                    continue
+                context_messages.append({
+                    "author": msg.author.display_name,
+                    "content": msg.content,
+                })
 
-        for msg in after_msgs:
-            # Don't include the !fact command message itself as context
-            if msg.id == ctx.message.id:
-                continue
-            context_messages.append({
-                "author": msg.author.display_name,
-                "content": msg.content,
-            })
+        except Exception as e:
+            print(f"Error fetching context messages: {e}")
 
-    except Exception as e:
-        print(f"Error fetching context messages: {e}")
+    elif query:
+        # --- Mode 2: inline question / claim ---
+        target_text = query
+        target_author = ctx.author  # attribute the claim to the person asking
+
+    else:
+        await ctx.send("Reply to a message with `!fact` or use `!fact <question/claim>` to fact-check something.")
+        return
 
     # Show typing indicator while waiting for the API
     async with ctx.typing():
         response = await asyncio.to_thread(
-            send_fact_check, target_msg.content, context_messages
+            send_fact_check, target_text, context_messages
         )
 
     if not response or response.startswith("Error"):
@@ -778,12 +791,13 @@ async def fact(ctx):
         explanation = result.get("explanation", "No explanation provided.")
         correction = result.get("correction")
 
-        # Update fact count for the *author of the original message*
-        author_id = str(target_msg.author.id)
-        if verdict in ("true", "false"):
-            update_fact_count_in_firebase(author_id, verdict)
-        elif verdict == "partially_true":
-            update_fact_count_in_firebase(author_id, "false")
+        # Update fact count for the author of the claim
+        author_id = str(target_author.id) if target_author else None
+        if author_id:
+            if verdict in ("true", "false"):
+                update_fact_count_in_firebase(author_id, verdict)
+            elif verdict == "partially_true":
+                update_fact_count_in_firebase(author_id, "false")
 
         # Format the Discord reply
         if verdict == "true":
@@ -804,10 +818,12 @@ async def fact(ctx):
             reply += f"\n\n**Correction:** {correction}"
 
         # Append the author's running fact score
-        user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
-        true_ct = user_facts.get("true", 0)
-        false_ct = user_facts.get("false", 0)
-        reply += f"\n\n📊 **{target_msg.author.display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
+        if author_id:
+            user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
+            true_ct = user_facts.get("true", 0)
+            false_ct = user_facts.get("false", 0)
+            display_name = target_author.display_name if target_author else "Unknown"
+            reply += f"\n\n📊 **{display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
 
     except (json.JSONDecodeError, KeyError):
         # If JSON parsing fails, just show the raw model response
