@@ -69,6 +69,10 @@ regular_transitions = defaultdict(lambda: {"online": 0, "offline": 0})
 no_message_data = defaultdict(int)
 audio_counts = {"count": 0}  # Simple dict for audio count
 fact_counts = {}  # {user_id_str: {"true": N, "false": N}}
+# Cache of recent verdict messages so users can reply to argue against them.
+# Maps bot message ID -> {"claim": str, "verdict": str, "explanation": str, "author_id": str}
+fact_verdict_cache = {}
+FACT_VERDICT_CACHE_MAX = 200  # keep last N verdicts in memory
 show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
 
@@ -700,8 +704,8 @@ def send_fact_check(target_message, context_messages):
 @bot.command(
     name="fact",
     brief="Fact-check a message or question",
-    description="Reply to a message with !fact to fact-check it, or use !fact <question/claim> to ask or verify something directly.",
-    usage="[question or claim (optional if replying)]",
+    description="Reply to a message with !fact to fact-check it. You can add extra context after !fact when replying (e.g. '!fact this guy is Ed Sheeran'). Reply to a verdict with !fact <argument> to challenge it. Or use !fact <question/claim> to verify something directly.",
+    usage="[extra context, counter-argument, or claim]",
 )
 async def fact(
     ctx,
@@ -712,55 +716,93 @@ async def fact(
     target_text = None
     target_author = None  # discord.Member or None
     context_messages = []
+    is_reconsideration = False
 
     if is_reply:
-        # --- Mode 1: reply to a message ---
         try:
             target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         except discord.NotFound:
             await ctx.send("Could not find the referenced message.")
             return
 
-        if not target_msg.content:
-            await ctx.send("The referenced message has no text content to fact-check.")
-            return
+        # --- Mode 0: replying to a verdict to argue against it ---
+        cached = fact_verdict_cache.get(target_msg.id)
+        if cached and target_msg.author.id == bot.user.id:
+            if not query:
+                await ctx.send("Reply to a verdict with `!fact <your argument>` to challenge it.")
+                return
 
-        target_text = target_msg.content
-        target_author = target_msg.author
-
-        # Gather +/- 2 messages around the target for context
-        try:
-            before_msgs = []
-            async for msg in ctx.channel.history(limit=2, before=target_msg):
-                before_msgs.append(msg)
-            before_msgs.reverse()
-
-            after_msgs = []
-            async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
-                after_msgs.append(msg)
-
-            for msg in before_msgs:
-                context_messages.append({
-                    "author": msg.author.display_name,
-                    "content": msg.content,
-                })
+            is_reconsideration = True
+            target_text = cached["claim"]
+            # Restore the original claim author for score tracking
+            if cached.get("author_id"):
+                try:
+                    target_author = ctx.guild.get_member(int(cached["author_id"]))
+                except (ValueError, TypeError):
+                    pass
 
             context_messages.append({
-                "author": target_msg.author.display_name,
-                "content": target_msg.content,
-                "is_target": True,
+                "author": "Fact-Checker (previous verdict)",
+                "content": (
+                    f"Previous verdict: {cached['verdict'].upper()}. "
+                    f"Explanation: {cached['explanation']}"
+                ),
+            })
+            context_messages.append({
+                "author": ctx.author.display_name,
+                "content": f"(Counter-argument: {query})",
             })
 
-            for msg in after_msgs:
-                if msg.id == ctx.message.id:
-                    continue
+        else:
+            # --- Mode 1: reply to a message (optionally with extra context) ---
+            if not target_msg.content:
+                await ctx.send("The referenced message has no text content to fact-check.")
+                return
+
+            target_text = target_msg.content
+            target_author = target_msg.author
+
+            # Gather +/- 2 messages around the target for context
+            try:
+                before_msgs = []
+                async for msg in ctx.channel.history(limit=2, before=target_msg):
+                    before_msgs.append(msg)
+                before_msgs.reverse()
+
+                after_msgs = []
+                async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
+                    after_msgs.append(msg)
+
+                for msg in before_msgs:
+                    context_messages.append({
+                        "author": msg.author.display_name,
+                        "content": msg.content,
+                    })
+
                 context_messages.append({
-                    "author": msg.author.display_name,
-                    "content": msg.content,
+                    "author": target_msg.author.display_name,
+                    "content": target_msg.content,
+                    "is_target": True,
                 })
 
-        except Exception as e:
-            print(f"Error fetching context messages: {e}")
+                for msg in after_msgs:
+                    if msg.id == ctx.message.id:
+                        continue
+                    context_messages.append({
+                        "author": msg.author.display_name,
+                        "content": msg.content,
+                    })
+
+            except Exception as e:
+                print(f"Error fetching context messages: {e}")
+
+            # If the user added extra text after !fact, include it as
+            # additional context so the model knows e.g. who "this guy" is.
+            if query:
+                context_messages.append({
+                    "author": ctx.author.display_name,
+                    "content": f"(Additional context: {query})",
+                })
 
     elif query:
         # --- Mode 2: inline question / claim ---
@@ -804,8 +846,6 @@ async def fact(
         if author_id:
             if verdict in ("true", "false"):
                 update_fact_count_in_firebase(author_id, verdict)
-            elif verdict == "partially_true":
-                update_fact_count_in_firebase(author_id, "false")
 
         # Format the Discord reply
         if verdict == "true":
@@ -821,7 +861,10 @@ async def fact(
             emoji = "❓"
             verdict_text = "UNKNOWN"
 
-        reply = f"{emoji} **Verdict: {verdict_text}**\n\n{explanation}"
+        if is_reconsideration:
+            reply = f"🔄 **Reconsidered Verdict: {verdict_text}**\n\n{explanation}"
+        else:
+            reply = f"{emoji} **Verdict: {verdict_text}**\n\n{explanation}"
         if correction:
             reply += f"\n\n**Correction:** {correction}"
 
@@ -843,12 +886,31 @@ async def fact(
     except (json.JSONDecodeError, KeyError):
         # If JSON parsing fails, just show the raw model response
         reply = response
+        verdict = None
+        explanation = ""
 
     # Discord 2000-char limit — split if needed
+    # Track the first message sent so we can cache the verdict against it
+    sent_messages = []
     max_length = 2000
     for i in range(0, len(reply), max_length):
         chunk = reply[i : i + max_length]
-        await ctx.send(chunk)
+        sent_msg = await ctx.send(chunk)
+        sent_messages.append(sent_msg)
+
+    # Cache verdict data on the first bot message so users can reply to challenge it
+    if sent_messages and target_text:
+        # Evict oldest entries if cache is too large
+        if len(fact_verdict_cache) >= FACT_VERDICT_CACHE_MAX:
+            oldest_key = next(iter(fact_verdict_cache))
+            del fact_verdict_cache[oldest_key]
+
+        fact_verdict_cache[sent_messages[0].id] = {
+            "claim": target_text,
+            "verdict": verdict if verdict else "unknown",
+            "explanation": explanation if explanation else "",
+            "author_id": str(target_author.id) if target_author else None,
+        }
 
 
 @bot.command(
