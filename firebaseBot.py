@@ -71,6 +71,32 @@ audio_counts = {"count": 0}  # Simple dict for audio count
 fact_counts = {}  # {user_id_str: {"true": N, "false": N}}
 show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
+startup_changelog_posted = False  # Prevent duplicate posts on reconnect
+CHANGELOG_ENTRIES = [
+    {
+        "date": "2025-09-11",
+        "title": "Unknown verdict explanation improved",
+        "details": "When `!fact` returns `unknown`, the bot now shows model reasoning tokens as the explanation (when available).",
+    },
+    {
+        "date": "2025-09-11",
+        "title": "Friend lookup supports Discord IDs",
+        "details": "Fact checks now recognize friend names and Discord IDs/mentions for memory-based verification.",
+    },
+]
+
+
+def build_changelog_message(limit: int = 2) -> str:
+    """Build a formatted changelog message."""
+    if not CHANGELOG_ENTRIES:
+        return "No changelog entries available."
+
+    lines = ["📝 **Recent Changes**"]
+    for entry in CHANGELOG_ENTRIES[: max(1, limit)]:
+        lines.append(
+            f"- `{entry['date']}` **{entry['title']}**: {entry['details']}"
+        )
+    return "\n".join(lines)
 
 
 # --- Firebase Data Loading ---
@@ -288,12 +314,17 @@ def send_ask(prompt, user_id):
 # --- Bot Events ---
 @bot.event
 async def on_ready():
+    global startup_changelog_posted
     print(f"Logged in as {bot.user}")
     load_data_from_firebase()  # Load data when bot starts
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         await channel.send(f"Fired up and ready to lurk! {LURKER} {LURKIN}")
-    reset_daily_count.start()
+        if not startup_changelog_posted:
+            await channel.send(build_changelog_message(limit=2))
+            startup_changelog_posted = True
+    if not reset_daily_count.is_running():
+        reset_daily_count.start()
 
 
 @bot.event
@@ -675,7 +706,8 @@ async def ask(
 
 def send_fact_check(target_message, context_messages):
     """Send a fact-check request to the /fact endpoint.
-    Returns a dict with 'response' (str) and 'searches' (list of str).
+    Returns a dict with 'response' (str), 'searches' (list of str),
+    and optional 'reasoning' (str).
     """
     payload = {
         "key": ALEX_KEY,
@@ -689,12 +721,21 @@ def send_fact_check(target_message, context_messages):
             return {
                 "response": data.get("response", "No response field found"),
                 "searches": data.get("searches", []),
+                "reasoning": data.get("reasoning", ""),
             }
         else:
-            return {"response": f"Error: Received status code {response.status_code}", "searches": []}
+            return {
+                "response": f"Error: Received status code {response.status_code}",
+                "searches": [],
+                "reasoning": "",
+            }
     except requests.exceptions.RequestException as e:
         print(f"Fact check request failed: {e}")
-        return {"response": "Error: Could not connect to the API.", "searches": []}
+        return {
+            "response": "Error: Could not connect to the API.",
+            "searches": [],
+            "reasoning": "",
+        }
 
 
 @bot.command(
@@ -779,6 +820,7 @@ async def fact(
 
     response = fact_result.get("response", "")
     searches = fact_result.get("searches", [])
+    reasoning = fact_result.get("reasoning", "")
 
     if not response or response.startswith("Error"):
         await ctx.send(f"Could not complete the fact check. {response}")
@@ -798,6 +840,10 @@ async def fact(
         verdict = result.get("verdict", "unknown").lower()
         explanation = result.get("explanation", "No explanation provided.")
         correction = result.get("correction")
+
+        # If verdict is unknown, surface model reasoning tokens as requested.
+        if verdict == "unknown" and isinstance(reasoning, str) and reasoning.strip():
+            explanation = reasoning.strip()
 
         # Update fact count for the author of the claim
         author_id = str(target_author.id) if target_author else None
@@ -904,6 +950,18 @@ async def factcount(ctx):
     for i in range(0, len(reply), max_length):
         chunk = reply[i : i + max_length]
         await ctx.send(chunk)
+
+
+@bot.command(
+    name="changelog",
+    brief="Show recent bot changes",
+    description="Displays the most recent changes made to fact-checking behavior.",
+)
+async def changelog(ctx):
+    reply = build_changelog_message(limit=2)
+    max_length = 2000
+    for i in range(0, len(reply), max_length):
+        await ctx.send(reply[i : i + max_length])
 
 
 @bot.command(
