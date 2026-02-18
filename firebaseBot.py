@@ -323,20 +323,7 @@ async def on_ready():
     load_data_from_firebase()  # Load data when bot starts
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        changelog = (
-            f"Fired up and ready to lurk! {LURKER} {LURKIN}\n\n"
-            f"**Alex Bot just got an update!**\n\n"
-            "Here's what's new:\n"
-            "🔍 **Smarter fact-checking** — I actually search the web now instead of guessing from memory. No more outdated answers.\n"
-            "📅 **I know what day it is** — Added a date tool so I stop thinking it's 2024.\n"
-            "💬 **!fact context** — Reply to a message with `!fact <context>` to give me extra info (e.g. `!fact this guy is Ed Sheeran`).\n"
-            "🔄 **Challenge a verdict** — Reply to one of my fact-check verdicts with `!fact <your argument>` and I'll genuinely reconsider.\n"
-            "🧠 **Friend memory lookup** — If a fact-check mentions one of you guys, I'll pull up what I know before ruling.\n"
-            "⚖️ **Partially true no longer counts against you** — Only clear true/false verdicts affect your score now.\n"
-            "🗳️ **Subjective claims get a ruling** — I'll pick a side instead of copping out with \"unknown\".\n"
-            "❓ **Better unknown verdicts** — When I can't reach a verdict, I'll explain what I found and why I couldn't decide."
-        )
-        await channel.send(changelog)
+        await channel.send(f"Fired up and ready to lurk! {LURKER} {LURKIN}")
         if not startup_changelog_posted:
             await channel.send(build_changelog_message(limit=2))
             startup_changelog_posted = True
