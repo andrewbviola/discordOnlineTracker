@@ -78,12 +78,14 @@ tracking_enabled = True  # Toggle for online tracking
 startup_changelog_posted = False  # Prevent duplicate posts on reconnect
 CHANGELOG_ENTRIES = [
     {
-        "date": "2025-09-11",
+        "title": "Unknown verdict output simplified",
+        "details": "For `unknown` verdicts, `!fact` now omits both the Sources section and the user's Fact Score.",
+    },
+    {
         "title": "Unknown verdict explanation improved",
         "details": "When `!fact` returns `unknown`, the bot now shows model reasoning tokens as the explanation (when available).",
     },
     {
-        "date": "2025-09-11",
         "title": "Friend lookup supports Discord IDs",
         "details": "Fact checks now recognize friend names and Discord IDs/mentions for memory-based verification.",
     },
@@ -98,7 +100,7 @@ def build_changelog_message(limit: int = 2) -> str:
     lines = ["📝 **Recent Changes**"]
     for entry in CHANGELOG_ENTRIES[: max(1, limit)]:
         lines.append(
-            f"- `{entry['date']}` **{entry['title']}**: {entry['details']}"
+            f"- **{entry['title']}**: {entry['details']}"
         )
     return "\n".join(lines)
 
@@ -914,20 +916,22 @@ async def fact(
         if correction:
             reply += f"\n\n**Correction:** {correction}"
 
-        # Show whether online sources were used
-        if searches:
-            search_list = ", ".join(f'"{s}"' for s in searches)
-            reply += f"\n\n🌐 **Sources:** Searched the web for {search_list}"
-        else:
-            reply += "\n\n📖 **Sources:** Answered from general knowledge (no web search used)"
+        # For unknown verdicts, omit sources and score to keep output concise.
+        if verdict != "unknown":
+            # Show whether online sources were used
+            if searches:
+                search_list = ", ".join(f'"{s}"' for s in searches)
+                reply += f"\n\n🌐 **Sources:** Searched the web for {search_list}"
+            else:
+                reply += "\n\n📖 **Sources:** Answered from general knowledge (no web search used)"
 
-        # Append the author's running fact score
-        if author_id:
-            user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
-            true_ct = user_facts.get("true", 0)
-            false_ct = user_facts.get("false", 0)
-            display_name = target_author.display_name if target_author else "Unknown"
-            reply += f"\n\n📊 **{display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
+            # Append the author's running fact score
+            if author_id:
+                user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
+                true_ct = user_facts.get("true", 0)
+                false_ct = user_facts.get("false", 0)
+                display_name = target_author.display_name if target_author else "Unknown"
+                reply += f"\n\n📊 **{display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
 
     except (json.JSONDecodeError, KeyError):
         # If JSON parsing fails, just show the raw model response
