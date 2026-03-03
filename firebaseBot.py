@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import firebase_admin  # Import Firebase
 from firebase_admin import credentials, db  # Import credentials and db
 import re
+from typing import Dict, List, Any
 
 load_dotenv()
 
@@ -73,21 +74,34 @@ fact_counts = {}  # {user_id_str: {"true": N, "false": N}}
 # Maps bot message ID -> {"claim": str, "verdict": str, "explanation": str, "author_id": str}
 fact_verdict_cache = {}
 FACT_VERDICT_CACHE_MAX = 200  # keep last N verdicts in memory
+# Cache ask-thread history by bot message ID so reply chains can continue naturally.
+# Each value is a list of {"role": "user"|"assistant", "content": "..."} turns.
+ask_thread_cache: Dict[int, List[Dict[str, str]]] = {}
+ASK_THREAD_CACHE_MAX = 400
+ASK_REPLY_DEFAULT_PROMPT = "respond to this"
 show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
 startup_changelog_posted = False  # Prevent duplicate posts on reconnect
 CHANGELOG_ENTRIES = [
     {
-        "title": "Unknown verdict output simplified",
-        "details": "For `unknown` verdicts, `!fact` now omits both the Sources section and the user's Fact Score.",
+        "title": "Ask replies now continue threads",
+        "details": "Users can reply to a previous `!ask` bot response and continue the same conversation with prior turns included as context.",
     },
     {
-        "title": "Unknown verdict explanation improved",
-        "details": "When `!fact` returns `unknown`, the bot now shows model reasoning tokens as the explanation (when available).",
+        "title": "Ask reply-chain context fallback",
+        "details": "If thread cache is missing, `!ask` now reconstructs context from Discord reply ancestry so follow-up replies still work like a chat thread.",
     },
     {
-        "title": "Friend lookup supports Discord IDs",
-        "details": "Fact checks now recognize friend names and Discord IDs/mentions for memory-based verification.",
+        "title": "Qwen 3.5 model upgrade",
+        "details": "Backend chat and fact-check prompts now use `qwen3.5:9b` with Ollama tool-calling compatibility preserved.",
+    },
+    {
+        "title": "Fact checks prefer TRUE/FALSE",
+        "details": "Fact-checking now strongly favors binary verdicts and normalizes `unknown`/`partially_true` toward `false` for more reliable outputs.",
+    },
+    {
+        "title": "Expanded context and memory access",
+        "details": "Increased Ollama context windows and removed fixed friend-memory caps so lookups can return all stored memories by default.",
     },
 ]
 
@@ -315,6 +329,89 @@ def send_ask(prompt, user_id):
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
         return "Error: Could not connect to the API."
+
+
+def _trim_thread_history(history: List[Dict[str, str]], max_chars: int = 12000) -> List[Dict[str, str]]:
+    """Keep most recent turns under a character budget."""
+    if not history:
+        return history
+    total = 0
+    kept = []
+    for turn in reversed(history):
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        turn_len = len(content)
+        if kept and total + turn_len > max_chars:
+            break
+        kept.append({"role": turn.get("role", "user"), "content": content})
+        total += turn_len
+    kept.reverse()
+    return kept
+
+
+def _strip_ask_prefix(content: str) -> str:
+    """Strip '!ask' prefix if present so history stores only conversational text."""
+    if not content:
+        return ""
+    stripped = content.strip()
+    if not stripped.lower().startswith("!ask"):
+        return stripped
+    remainder = stripped[4:].strip()
+    return remainder
+
+
+def _format_ask_prompt_from_history(history: List[Dict[str, str]], latest_user_prompt: str) -> str:
+    """
+    Build a single prompt payload from prior turns + latest user message.
+    The backend /ask endpoint injects the system prompt once, so we only send dialogue here.
+    """
+    lines = ["Conversation so far:"]
+    for turn in history:
+        role = turn.get("role", "user")
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "Alex" if role == "assistant" else "User"
+        lines.append(f"{speaker}: {content}")
+    lines.append(f"User: {latest_user_prompt.strip()}")
+    lines.append("Alex:")
+    return "\n".join(lines)
+
+
+async def _reconstruct_reply_history(ctx, referenced_message: discord.Message) -> List[Dict[str, str]]:
+    """
+    Fallback history reconstruction from Discord message.reply chains.
+    Used when we don't have a cached ask-thread for the referenced message.
+    """
+    chain = []
+    cursor = referenced_message
+    max_hops = 25
+    for _ in range(max_hops):
+        if not cursor:
+            break
+        chain.append(cursor)
+        ref = cursor.reference
+        if not ref or not ref.message_id:
+            break
+        try:
+            cursor = await ctx.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            break
+
+    chain.reverse()
+    history: List[Dict[str, str]] = []
+    for msg in chain:
+        content = (msg.content or "").strip()
+        if not content:
+            continue
+        if msg.author.id == bot.user.id:
+            history.append({"role": "assistant", "content": content})
+        else:
+            cleaned = _strip_ask_prefix(content)
+            if cleaned:
+                history.append({"role": "user", "content": cleaned})
+    return _trim_thread_history(history)
 
 
 # --- Bot Events ---
@@ -691,23 +788,62 @@ async def tracking(ctx):
 async def ask(
     ctx, *, prompt: str = commands.parameter(default=None, description="A prompt")
 ):
-    if prompt is None:
+    prompt = (prompt or "").strip()
+    referenced = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        try:
+            referenced = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            referenced = None
+
+    if not prompt and referenced:
+        prompt = ASK_REPLY_DEFAULT_PROMPT
+
+    if not prompt:
         await ctx.send("No prompt")
-    else:
-        # Show typing indicator while generating response
-        async with ctx.typing():
-            # Run the blocking request in a thread to not block the event loop
-            response = await asyncio.to_thread(send_ask, prompt, ctx.author.id)
-        
-        if response:
-            # Discord has a 2000 character limit per message
-            # Split long responses into multiple messages
-            max_length = 2000
-            for i in range(0, len(response), max_length):
-                chunk = response[i : i + max_length]
-                await ctx.send(chunk)
+        return
+
+    thread_history: List[Dict[str, str]] = []
+    if referenced:
+        # Prefer exact cached ask thread state when replying to previous bot output.
+        cached = ask_thread_cache.get(referenced.id)
+        if cached:
+            thread_history = list(cached)
         else:
-            await ctx.send("No response received from the API.")
+            # Fallback: rebuild context from reply-chain ancestry.
+            thread_history = await _reconstruct_reply_history(ctx, referenced)
+
+    thread_history = _trim_thread_history(thread_history)
+    compiled_prompt = _format_ask_prompt_from_history(thread_history, prompt)
+
+    # Show typing indicator while generating response
+    async with ctx.typing():
+        # Run the blocking request in a thread to not block the event loop
+        response = await asyncio.to_thread(send_ask, compiled_prompt, ctx.author.id)
+
+    if response:
+        # Persist latest turn so future replies continue the same chat thread.
+        updated_history = _trim_thread_history(
+            thread_history
+            + [{"role": "user", "content": prompt}]
+            + [{"role": "assistant", "content": response}]
+        )
+
+        # Discord has a 2000 character limit per message
+        max_length = 2000
+        sent_messages = []
+        for i in range(0, len(response), max_length):
+            chunk = response[i : i + max_length]
+            sent_msg = await ctx.send(chunk)
+            sent_messages.append(sent_msg)
+
+        for sent_msg in sent_messages:
+            ask_thread_cache[sent_msg.id] = list(updated_history)
+        while len(ask_thread_cache) > ASK_THREAD_CACHE_MAX:
+            oldest_id = next(iter(ask_thread_cache))
+            ask_thread_cache.pop(oldest_id, None)
+    else:
+        await ctx.send("No response received from the API.")
 
 
 def send_fact_check(target_message, context_messages):
