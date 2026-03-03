@@ -84,29 +84,26 @@ tracking_enabled = True  # Toggle for online tracking
 startup_changelog_posted = False  # Prevent duplicate posts on reconnect
 CHANGELOG_ENTRIES = [
     {
-        "title": "Ask replies now continue threads",
-        "details": "Users can reply to a previous `!ask` bot response and continue the same conversation with prior turns included as context.",
+        "title": "Auto fact replies in threads",
+        "details": "Replying to a bot fact-check verdict now triggers reconsideration automatically without needing to type `!fact` again.",
     },
     {
-        "title": "Ask reply-chain context fallback",
-        "details": "If thread cache is missing, `!ask` now reconstructs context from Discord reply ancestry so follow-up replies still work like a chat thread.",
+        "title": "Auto ask replies in threads",
+        "details": "Replying to a bot `!ask` response now continues the conversation automatically without needing to type `!ask` again.",
     },
+    {
+        "title": "Empty !ask replies supported",
+        "details": "When replying to an ask thread, `!ask` with no text now uses a default continuation prompt (`respond to this`).",
+    },
+   
     {
         "title": "Qwen 3.5 model upgrade",
-        "details": "Backend chat and fact-check prompts now use `qwen3.5:9b` with Ollama tool-calling compatibility preserved.",
-    },
-    {
-        "title": "Fact checks prefer TRUE/FALSE",
-        "details": "Fact-checking now strongly favors binary verdicts and normalizes `unknown`/`partially_true` toward `false` for more reliable outputs.",
-    },
-    {
-        "title": "Expanded context and memory access",
-        "details": "Increased Ollama context windows and removed fixed friend-memory caps so lookups can return all stored memories by default.",
+        "details": "Backend chat and fact-check prompts now use `qwen3.5:9b`",
     },
 ]
 
 
-def build_changelog_message(limit: int = 2) -> str:
+def build_changelog_message(limit: int = 10) -> str:
     """Build a formatted changelog message."""
     if not CHANGELOG_ENTRIES:
         return "No changelog entries available."
@@ -379,7 +376,9 @@ def _format_ask_prompt_from_history(history: List[Dict[str, str]], latest_user_p
     return "\n".join(lines)
 
 
-async def _reconstruct_reply_history(ctx, referenced_message: discord.Message) -> List[Dict[str, str]]:
+async def _reconstruct_reply_history(
+    channel: discord.abc.Messageable, referenced_message: discord.Message
+) -> List[Dict[str, str]]:
     """
     Fallback history reconstruction from Discord message.reply chains.
     Used when we don't have a cached ask-thread for the referenced message.
@@ -395,7 +394,7 @@ async def _reconstruct_reply_history(ctx, referenced_message: discord.Message) -
         if not ref or not ref.message_id:
             break
         try:
-            cursor = await ctx.channel.fetch_message(ref.message_id)
+            cursor = await channel.fetch_message(ref.message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             break
 
@@ -412,6 +411,58 @@ async def _reconstruct_reply_history(ctx, referenced_message: discord.Message) -
             if cleaned:
                 history.append({"role": "user", "content": cleaned})
     return _trim_thread_history(history)
+
+
+async def _handle_ask_turn(
+    channel: discord.abc.Messageable,
+    author_id: int,
+    prompt: str,
+    referenced: discord.Message = None,
+) -> None:
+    """Execute one ask turn with optional reply-thread context."""
+    prompt = (prompt or "").strip()
+    if not prompt and referenced:
+        prompt = ASK_REPLY_DEFAULT_PROMPT
+    if not prompt:
+        await channel.send("No prompt")
+        return
+
+    thread_history: List[Dict[str, str]] = []
+    if referenced:
+        cached = ask_thread_cache.get(referenced.id)
+        if cached:
+            thread_history = list(cached)
+        else:
+            thread_history = await _reconstruct_reply_history(channel, referenced)
+
+    thread_history = _trim_thread_history(thread_history)
+    compiled_prompt = _format_ask_prompt_from_history(thread_history, prompt)
+
+    async with channel.typing():
+        response = await asyncio.to_thread(send_ask, compiled_prompt, author_id)
+
+    if not response:
+        await channel.send("No response received from the API.")
+        return
+
+    updated_history = _trim_thread_history(
+        thread_history
+        + [{"role": "user", "content": prompt}]
+        + [{"role": "assistant", "content": response}]
+    )
+
+    max_length = 2000
+    sent_messages = []
+    for i in range(0, len(response), max_length):
+        chunk = response[i : i + max_length]
+        sent_msg = await channel.send(chunk)
+        sent_messages.append(sent_msg)
+
+    for sent_msg in sent_messages:
+        ask_thread_cache[sent_msg.id] = list(updated_history)
+    while len(ask_thread_cache) > ASK_THREAD_CACHE_MAX:
+        oldest_id = next(iter(ask_thread_cache))
+        ask_thread_cache.pop(oldest_id, None)
 
 
 # --- Bot Events ---
@@ -517,6 +568,44 @@ async def on_message(message):
             )
         except Exception as e:
             print(f"Error processing message history: {e}")
+
+    # Auto-thread continuation for ask:
+    # If user replies to a previous ask response, continue without requiring "!ask".
+    if not message.author.bot and message.reference and message.reference.message_id:
+        content = (message.content or "").strip()
+        if not content.startswith(str(bot.command_prefix)):
+            try:
+                referenced = await message.channel.fetch_message(message.reference.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                referenced = None
+            if referenced and referenced.author == bot.user and referenced.id in ask_thread_cache:
+                await _handle_ask_turn(
+                    channel=message.channel,
+                    author_id=message.author.id,
+                    prompt=content,
+                    referenced=referenced,
+                )
+                return
+
+    # Auto-thread continuation for fact:
+    # If user replies to a previous fact verdict, continue without requiring "!fact".
+    if not message.author.bot and message.reference and message.reference.message_id:
+        content = (message.content or "").strip()
+        if not content.startswith(str(bot.command_prefix)):
+            try:
+                referenced = await message.channel.fetch_message(message.reference.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                referenced = None
+            if referenced and referenced.author == bot.user and referenced.id in fact_verdict_cache:
+                await _handle_fact_turn(
+                    channel=message.channel,
+                    author=message.author,
+                    guild=message.guild,
+                    query=content,
+                    referenced=referenced,
+                    requester_message_id=message.id,
+                )
+                return
 
     await bot.process_commands(message)
 
@@ -788,7 +877,6 @@ async def tracking(ctx):
 async def ask(
     ctx, *, prompt: str = commands.parameter(default=None, description="A prompt")
 ):
-    prompt = (prompt or "").strip()
     referenced = None
     if ctx.message.reference and ctx.message.reference.message_id:
         try:
@@ -796,54 +884,12 @@ async def ask(
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             referenced = None
 
-    if not prompt and referenced:
-        prompt = ASK_REPLY_DEFAULT_PROMPT
-
-    if not prompt:
-        await ctx.send("No prompt")
-        return
-
-    thread_history: List[Dict[str, str]] = []
-    if referenced:
-        # Prefer exact cached ask thread state when replying to previous bot output.
-        cached = ask_thread_cache.get(referenced.id)
-        if cached:
-            thread_history = list(cached)
-        else:
-            # Fallback: rebuild context from reply-chain ancestry.
-            thread_history = await _reconstruct_reply_history(ctx, referenced)
-
-    thread_history = _trim_thread_history(thread_history)
-    compiled_prompt = _format_ask_prompt_from_history(thread_history, prompt)
-
-    # Show typing indicator while generating response
-    async with ctx.typing():
-        # Run the blocking request in a thread to not block the event loop
-        response = await asyncio.to_thread(send_ask, compiled_prompt, ctx.author.id)
-
-    if response:
-        # Persist latest turn so future replies continue the same chat thread.
-        updated_history = _trim_thread_history(
-            thread_history
-            + [{"role": "user", "content": prompt}]
-            + [{"role": "assistant", "content": response}]
-        )
-
-        # Discord has a 2000 character limit per message
-        max_length = 2000
-        sent_messages = []
-        for i in range(0, len(response), max_length):
-            chunk = response[i : i + max_length]
-            sent_msg = await ctx.send(chunk)
-            sent_messages.append(sent_msg)
-
-        for sent_msg in sent_messages:
-            ask_thread_cache[sent_msg.id] = list(updated_history)
-        while len(ask_thread_cache) > ASK_THREAD_CACHE_MAX:
-            oldest_id = next(iter(ask_thread_cache))
-            ask_thread_cache.pop(oldest_id, None)
-    else:
-        await ctx.send("No response received from the API.")
+    await _handle_ask_turn(
+        channel=ctx.channel,
+        author_id=ctx.author.id,
+        prompt=(prompt or ""),
+        referenced=referenced,
+    )
 
 
 def send_fact_check(target_message, context_messages):
@@ -880,35 +926,30 @@ def send_fact_check(target_message, context_messages):
         }
 
 
-@bot.command(
-    name="fact",
-    brief="Fact-check a message or question",
-    description="Reply to a message with !fact to fact-check it. You can add extra context after !fact when replying (e.g. '!fact this guy is Ed Sheeran'). Reply to a verdict with !fact <argument> to challenge it. Or use !fact <question/claim> to verify something directly.",
-    usage="[extra context, counter-argument, or claim]",
-)
-async def fact(
-    ctx,
-    *,
-    query: str = commands.parameter(default=None, description="A question or claim to fact-check"),
-):
-    is_reply = ctx.message.reference and ctx.message.reference.message_id
+async def _handle_fact_turn(
+    channel: discord.abc.Messageable,
+    author: discord.abc.User,
+    guild: discord.Guild,
+    query: str = None,
+    referenced: discord.Message = None,
+    requester_message_id: int = None,
+) -> None:
+    """Execute one fact-check turn for command and auto-reply paths."""
+    query = (query or "").strip()
+    is_reply = referenced is not None
     target_text = None
     target_author = None  # discord.Member or None
     context_messages = []
     is_reconsideration = False
 
     if is_reply:
-        try:
-            target_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        except discord.NotFound:
-            await ctx.send("Could not find the referenced message.")
-            return
+        target_msg = referenced
 
-        # --- Mode 0: replying to a verdict to argue against it ---
+        # Mode 0: replying to a verdict to argue against it
         cached = fact_verdict_cache.get(target_msg.id)
         if cached and target_msg.author.id == bot.user.id:
             if not query:
-                await ctx.send("Reply to a verdict with `!fact <your argument>` to challenge it.")
+                await channel.send("Reply to a verdict with `!fact <your argument>` to challenge it.")
                 return
 
             is_reconsideration = True
@@ -916,26 +957,35 @@ async def fact(
             # Restore the original claim author for score tracking
             if cached.get("author_id"):
                 try:
-                    target_author = ctx.guild.get_member(int(cached["author_id"]))
+                    target_author = guild.get_member(int(cached["author_id"])) if guild else None
                 except (ValueError, TypeError):
                     pass
 
-            context_messages.append({
-                "author": "Fact-Checker (previous verdict)",
-                "content": (
-                    f"Previous verdict: {cached['verdict'].upper()}. "
-                    f"Explanation: {cached['explanation']}"
-                ),
-            })
-            context_messages.append({
-                "author": ctx.author.display_name,
-                "content": f"(Counter-argument: {query})",
-            })
+            display_name = (
+                author.display_name
+                if hasattr(author, "display_name")
+                else getattr(author, "name", "User")
+            )
+            context_messages.append(
+                {
+                    "author": "Fact-Checker (previous verdict)",
+                    "content": (
+                        f"Previous verdict: {cached['verdict'].upper()}. "
+                        f"Explanation: {cached['explanation']}"
+                    ),
+                }
+            )
+            context_messages.append(
+                {
+                    "author": display_name,
+                    "content": f"(Counter-argument: {query})",
+                }
+            )
 
         else:
-            # --- Mode 1: reply to a message (optionally with extra context) ---
+            # Mode 1: reply to a message (optionally with extra context)
             if not target_msg.content:
-                await ctx.send("The referenced message has no text content to fact-check.")
+                await channel.send("The referenced message has no text content to fact-check.")
                 return
 
             target_text = target_msg.content
@@ -944,66 +994,76 @@ async def fact(
             # Gather +/- 2 messages around the target for context
             try:
                 before_msgs = []
-                async for msg in ctx.channel.history(limit=2, before=target_msg):
+                async for msg in channel.history(limit=2, before=target_msg):
                     before_msgs.append(msg)
                 before_msgs.reverse()
 
                 after_msgs = []
-                async for msg in ctx.channel.history(limit=2, after=target_msg, oldest_first=True):
+                async for msg in channel.history(limit=2, after=target_msg, oldest_first=True):
                     after_msgs.append(msg)
 
                 for msg in before_msgs:
-                    context_messages.append({
-                        "author": msg.author.display_name,
-                        "content": msg.content,
-                    })
+                    context_messages.append(
+                        {
+                            "author": msg.author.display_name,
+                            "content": msg.content,
+                        }
+                    )
 
-                context_messages.append({
-                    "author": target_msg.author.display_name,
-                    "content": target_msg.content,
-                    "is_target": True,
-                })
+                context_messages.append(
+                    {
+                        "author": target_msg.author.display_name,
+                        "content": target_msg.content,
+                        "is_target": True,
+                    }
+                )
 
                 for msg in after_msgs:
-                    if msg.id == ctx.message.id:
+                    if requester_message_id and msg.id == requester_message_id:
                         continue
-                    context_messages.append({
-                        "author": msg.author.display_name,
-                        "content": msg.content,
-                    })
+                    context_messages.append(
+                        {
+                            "author": msg.author.display_name,
+                            "content": msg.content,
+                        }
+                    )
 
             except Exception as e:
                 print(f"Error fetching context messages: {e}")
 
-            # If the user added extra text after !fact, include it as
-            # additional context so the model knows e.g. who "this guy" is.
+            # If user added extra text, include it as additional context.
             if query:
-                context_messages.append({
-                    "author": ctx.author.display_name,
-                    "content": f"(Additional context: {query})",
-                })
+                display_name = (
+                    author.display_name
+                    if hasattr(author, "display_name")
+                    else getattr(author, "name", "User")
+                )
+                context_messages.append(
+                    {
+                        "author": display_name,
+                        "content": f"(Additional context: {query})",
+                    }
+                )
 
     elif query:
-        # --- Mode 2: inline question / claim ---
+        # Mode 2: inline question / claim
         target_text = query
-        target_author = ctx.author  # attribute the claim to the person asking
+        target_author = author  # attribute claim to person asking
 
     else:
-        await ctx.send("Reply to a message with `!fact` or use `!fact <question/claim>` to fact-check something.")
+        await channel.send("Reply to a message with `!fact` or use `!fact <question/claim>` to fact-check something.")
         return
 
     # Show typing indicator while waiting for the API
-    async with ctx.typing():
-        fact_result = await asyncio.to_thread(
-            send_fact_check, target_text, context_messages
-        )
+    async with channel.typing():
+        fact_result = await asyncio.to_thread(send_fact_check, target_text, context_messages)
 
     response = fact_result.get("response", "")
     searches = fact_result.get("searches", [])
     reasoning = fact_result.get("reasoning", "")
 
     if not response or response.startswith("Error"):
-        await ctx.send(f"Could not complete the fact check. {response}")
+        await channel.send(f"Could not complete the fact check. {response}")
         return
 
     # Parse the JSON verdict from the model
@@ -1027,9 +1087,8 @@ async def fact(
 
         # Update fact count for the author of the claim
         author_id = str(target_author.id) if target_author else None
-        if author_id:
-            if verdict in ("true", "false"):
-                update_fact_count_in_firebase(author_id, verdict)
+        if author_id and verdict in ("true", "false"):
+            update_fact_count_in_firebase(author_id, verdict)
 
         # Format the Discord reply
         if verdict == "true":
@@ -1066,7 +1125,9 @@ async def fact(
                 user_facts = fact_counts.get(author_id, {"true": 0, "false": 0})
                 true_ct = user_facts.get("true", 0)
                 false_ct = user_facts.get("false", 0)
-                display_name = target_author.display_name if target_author else "Unknown"
+                display_name = (
+                    target_author.display_name if hasattr(target_author, "display_name") else "Unknown"
+                )
                 reply += f"\n\n📊 **{display_name}'s Fact Score:** {true_ct} true / {false_ct} false"
 
     except (json.JSONDecodeError, KeyError):
@@ -1076,17 +1137,16 @@ async def fact(
         explanation = ""
 
     # Discord 2000-char limit — split if needed
-    # Track the first message sent so we can cache the verdict against it
+    # Track first message sent so users can reply to challenge it
     sent_messages = []
     max_length = 2000
     for i in range(0, len(reply), max_length):
         chunk = reply[i : i + max_length]
-        sent_msg = await ctx.send(chunk)
+        sent_msg = await channel.send(chunk)
         sent_messages.append(sent_msg)
 
     # Cache verdict data on the first bot message so users can reply to challenge it
     if sent_messages and target_text:
-        # Evict oldest entries if cache is too large
         if len(fact_verdict_cache) >= FACT_VERDICT_CACHE_MAX:
             oldest_key = next(iter(fact_verdict_cache))
             del fact_verdict_cache[oldest_key]
@@ -1097,6 +1157,35 @@ async def fact(
             "explanation": explanation if explanation else "",
             "author_id": str(target_author.id) if target_author else None,
         }
+
+
+@bot.command(
+    name="fact",
+    brief="Fact-check a message or question",
+    description="Reply to a message with !fact to fact-check it. You can add extra context after !fact when replying (e.g. '!fact this guy is Ed Sheeran'). Reply to a verdict with !fact <argument> to challenge it. Or use !fact <question/claim> to verify something directly.",
+    usage="[extra context, counter-argument, or claim]",
+)
+async def fact(
+    ctx,
+    *,
+    query: str = commands.parameter(default=None, description="A question or claim to fact-check"),
+):
+    referenced = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        try:
+            referenced = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await ctx.send("Could not find the referenced message.")
+            return
+
+    await _handle_fact_turn(
+        channel=ctx.channel,
+        author=ctx.author,
+        guild=ctx.guild,
+        query=(query or ""),
+        referenced=referenced,
+        requester_message_id=ctx.message.id,
+    )
 
 
 @bot.command(
