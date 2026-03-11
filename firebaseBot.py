@@ -6,6 +6,8 @@ from collections import defaultdict
 import json  # Keep for potential API interactions, but not file storage
 import asyncio
 import os
+import tempfile
+import random
 import matplotlib.pyplot as plt
 import io
 import requests
@@ -75,14 +77,29 @@ fact_counts = {}  # {user_id_str: {"true": N, "false": N}}
 fact_verdict_cache = {}
 FACT_VERDICT_CACHE_MAX = 200  # keep last N verdicts in memory
 # Cache ask-thread history by bot message ID so reply chains can continue naturally.
-# Each value is a list of {"role": "user"|"assistant", "content": "..."} turns.
-ask_thread_cache: Dict[int, List[Dict[str, str]]] = {}
+# Each value is a list of {"role": "user"|"assistant", "content": "...", "image_urls": [...]} turns.
+ask_thread_cache: Dict[int, List[Dict[str, Any]]] = {}
 ASK_THREAD_CACHE_MAX = 400
 ASK_REPLY_DEFAULT_PROMPT = "respond to this"
+ASK_IMAGE_DEFAULT_PROMPT = "describe this image"
+RANDOM_ASK_CHANCE_DENOMINATOR = 100
+RANDOM_ASK_HISTORY_LIMIT = 5
 show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
 startup_changelog_posted = False  # Prevent duplicate posts on reconnect
 CHANGELOG_ENTRIES = [
+    {
+        "title": "!tldr command added",
+        "details": "Reply to any text message with `!tldr` to get a short, neutral summary based only on that replied message.",
+    },
+    {
+        "title": "!ask image support",
+        "details": "`!ask` can now read attached images, including in reply threads and image-only prompts.",
+    },
+    {
+        "title": "!tts restored",
+        "details": "The `!tts` command now generates audio again through the backend voice clone route.",
+    },
     {
         "title": "Auto fact replies in threads",
         "details": "Replying to a bot fact-check verdict now triggers reconsideration automatically without needing to type `!fact` again.",
@@ -297,19 +314,63 @@ def send_think(prompt):
         print(f"Request failed: {e}")
 
 
-def send_ask(prompt, user_id):
+def _is_image_attachment(attachment: discord.Attachment) -> bool:
+    content_type = (attachment.content_type or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    lowered_name = (attachment.filename or "").lower()
+    return lowered_name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))
 
+
+def _extract_image_urls(message: discord.Message) -> List[str]:
+    urls = []
+    for attachment in getattr(message, "attachments", []) or []:
+        if _is_image_attachment(attachment):
+            urls.append(attachment.url)
+    return urls
+
+
+def _build_ask_turn(role: str, content: str = "", image_urls: List[str] = None) -> Dict[str, Any]:
+    return {
+        "role": role,
+        "content": (content or "").strip(),
+        "image_urls": list(image_urls or []),
+    }
+
+
+def _message_to_ask_turn(message: discord.Message) -> Dict[str, Any]:
+    """Convert a Discord message into an ask-thread turn."""
+    content = (message.content or "").strip()
+    image_urls = _extract_image_urls(message)
+
+    if message.author.id == bot.user.id:
+        if not content:
+            return {}
+        return _build_ask_turn("assistant", content, [])
+
+    cleaned = _strip_ask_prefix(content)
+    if not cleaned and not image_urls:
+        return {}
+    return _build_ask_turn("user", cleaned, image_urls)
+
+
+def send_ask(
+    prompt: str,
+    user_id: int,
+    history: List[Dict[str, Any]] = None,
+    image_urls: List[str] = None,
+):
     payload = {
         "key": ALEX_KEY,
         "prompt": prompt,
         "user_id": str(user_id),
+        "history": history or [],
+        "image_urls": image_urls or [],
     }
 
     try:
-        # Send the POST request
         response = requests.post(f"{API_URL}/ask", json=payload, timeout=1000)
 
-        # Check if the response is successful
         if response.status_code == 200:
             data = response.json()
             return data.get("response", "No response field found")
@@ -328,7 +389,7 @@ def send_ask(prompt, user_id):
         return "Error: Could not connect to the API."
 
 
-def _trim_thread_history(history: List[Dict[str, str]], max_chars: int = 12000) -> List[Dict[str, str]]:
+def _trim_thread_history(history: List[Dict[str, Any]], max_chars: int = 12000) -> List[Dict[str, Any]]:
     """Keep most recent turns under a character budget."""
     if not history:
         return history
@@ -336,15 +397,42 @@ def _trim_thread_history(history: List[Dict[str, str]], max_chars: int = 12000) 
     kept = []
     for turn in reversed(history):
         content = (turn.get("content") or "").strip()
-        if not content:
+        image_urls = turn.get("image_urls") or []
+        if not content and not image_urls:
             continue
-        turn_len = len(content)
+        turn_len = len(content) + (128 * len(image_urls))
         if kept and total + turn_len > max_chars:
             break
-        kept.append({"role": turn.get("role", "user"), "content": content})
+        kept.append(
+            _build_ask_turn(
+                role=turn.get("role", "user"),
+                content=content,
+                image_urls=image_urls,
+            )
+        )
         total += turn_len
     kept.reverse()
     return kept
+
+
+async def _send_ask_response(
+    channel: discord.abc.Messageable,
+    response: str,
+    updated_history: List[Dict[str, Any]],
+) -> None:
+    """Send an ask response and cache the resulting thread history."""
+    max_length = 2000
+    sent_messages = []
+    for i in range(0, len(response), max_length):
+        chunk = response[i : i + max_length]
+        sent_msg = await channel.send(chunk)
+        sent_messages.append(sent_msg)
+
+    for sent_msg in sent_messages:
+        ask_thread_cache[sent_msg.id] = list(updated_history)
+    while len(ask_thread_cache) > ASK_THREAD_CACHE_MAX:
+        oldest_id = next(iter(ask_thread_cache))
+        ask_thread_cache.pop(oldest_id, None)
 
 
 def _strip_ask_prefix(content: str) -> str:
@@ -358,27 +446,9 @@ def _strip_ask_prefix(content: str) -> str:
     return remainder
 
 
-def _format_ask_prompt_from_history(history: List[Dict[str, str]], latest_user_prompt: str) -> str:
-    """
-    Build a single prompt payload from prior turns + latest user message.
-    The backend /ask endpoint injects the system prompt once, so we only send dialogue here.
-    """
-    lines = ["Conversation so far:"]
-    for turn in history:
-        role = turn.get("role", "user")
-        content = (turn.get("content") or "").strip()
-        if not content:
-            continue
-        speaker = "Alex" if role == "assistant" else "User"
-        lines.append(f"{speaker}: {content}")
-    lines.append(f"User: {latest_user_prompt.strip()}")
-    lines.append("Alex:")
-    return "\n".join(lines)
-
-
 async def _reconstruct_reply_history(
     channel: discord.abc.Messageable, referenced_message: discord.Message
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """
     Fallback history reconstruction from Discord message.reply chains.
     Used when we don't have a cached ask-thread for the referenced message.
@@ -399,17 +469,11 @@ async def _reconstruct_reply_history(
             break
 
     chain.reverse()
-    history: List[Dict[str, str]] = []
+    history: List[Dict[str, Any]] = []
     for msg in chain:
-        content = (msg.content or "").strip()
-        if not content:
-            continue
-        if msg.author.id == bot.user.id:
-            history.append({"role": "assistant", "content": content})
-        else:
-            cleaned = _strip_ask_prefix(content)
-            if cleaned:
-                history.append({"role": "user", "content": cleaned})
+        turn = _message_to_ask_turn(msg)
+        if turn:
+            history.append(turn)
     return _trim_thread_history(history)
 
 
@@ -418,16 +482,21 @@ async def _handle_ask_turn(
     author_id: int,
     prompt: str,
     referenced: discord.Message = None,
+    source_message: discord.Message = None,
 ) -> None:
     """Execute one ask turn with optional reply-thread context."""
     prompt = (prompt or "").strip()
-    if not prompt and referenced:
-        prompt = ASK_REPLY_DEFAULT_PROMPT
+    current_image_urls = _extract_image_urls(source_message) if source_message else []
     if not prompt:
+        if current_image_urls:
+            prompt = ASK_IMAGE_DEFAULT_PROMPT
+        elif referenced:
+            prompt = ASK_REPLY_DEFAULT_PROMPT
+    if not prompt and not current_image_urls:
         await channel.send("No prompt")
         return
 
-    thread_history: List[Dict[str, str]] = []
+    thread_history: List[Dict[str, Any]] = []
     if referenced:
         cached = ask_thread_cache.get(referenced.id)
         if cached:
@@ -436,10 +505,15 @@ async def _handle_ask_turn(
             thread_history = await _reconstruct_reply_history(channel, referenced)
 
     thread_history = _trim_thread_history(thread_history)
-    compiled_prompt = _format_ask_prompt_from_history(thread_history, prompt)
 
     async with channel.typing():
-        response = await asyncio.to_thread(send_ask, compiled_prompt, author_id)
+        response = await asyncio.to_thread(
+            send_ask,
+            prompt,
+            author_id,
+            thread_history,
+            current_image_urls,
+        )
 
     if not response:
         await channel.send("No response received from the API.")
@@ -447,22 +521,67 @@ async def _handle_ask_turn(
 
     updated_history = _trim_thread_history(
         thread_history
-        + [{"role": "user", "content": prompt}]
-        + [{"role": "assistant", "content": response}]
+        + [_build_ask_turn("user", prompt, current_image_urls)]
+        + [_build_ask_turn("assistant", response, [])]
     )
+    await _send_ask_response(channel, response, updated_history)
 
-    max_length = 2000
-    sent_messages = []
-    for i in range(0, len(response), max_length):
-        chunk = response[i : i + max_length]
-        sent_msg = await channel.send(chunk)
-        sent_messages.append(sent_msg)
 
-    for sent_msg in sent_messages:
-        ask_thread_cache[sent_msg.id] = list(updated_history)
-    while len(ask_thread_cache) > ASK_THREAD_CACHE_MAX:
-        oldest_id = next(iter(ask_thread_cache))
-        ask_thread_cache.pop(oldest_id, None)
+async def _maybe_trigger_random_ask(message: discord.Message) -> None:
+    """Randomly trigger an unprompted ask-style response to the latest 5 messages."""
+    if message.author.bot:
+        return
+
+    content = (message.content or "").strip()
+    if content.startswith(str(bot.command_prefix)):
+        return
+
+    if random.randint(1, RANDOM_ASK_CHANCE_DENOMINATOR) != 1:
+        return
+
+    try:
+        recent_messages = [
+            msg async for msg in message.channel.history(limit=RANDOM_ASK_HISTORY_LIMIT)
+        ]
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Random ask history fetch failed: {e}")
+        return
+    except Exception as e:
+        print(f"Unexpected random ask history error: {e}")
+        return
+
+    recent_messages.reverse()
+    turns = []
+    for recent_message in recent_messages:
+        turn = _message_to_ask_turn(recent_message)
+        if turn:
+            turns.append(turn)
+
+    if not turns:
+        return
+
+    latest_turn = turns[-1]
+    thread_history = _trim_thread_history(turns[:-1])
+
+    async with message.channel.typing():
+        response = await asyncio.to_thread(
+            send_ask,
+            latest_turn.get("content", ""),
+            message.author.id,
+            thread_history,
+            latest_turn.get("image_urls") or [],
+        )
+
+    if not response or response.startswith("Error"):
+        print(f"Random ask failed: {response}")
+        return
+
+    updated_history = _trim_thread_history(
+        thread_history
+        + [latest_turn]
+        + [_build_ask_turn("assistant", response, [])]
+    )
+    await _send_ask_response(message.channel, response, updated_history)
 
 
 # --- Bot Events ---
@@ -584,6 +703,7 @@ async def on_message(message):
                     author_id=message.author.id,
                     prompt=content,
                     referenced=referenced,
+                    source_message=message,
                 )
                 return
 
@@ -607,6 +727,7 @@ async def on_message(message):
                 )
                 return
 
+    await _maybe_trigger_random_ask(message)
     await bot.process_commands(message)
 
 
@@ -687,7 +808,7 @@ async def tts(
     # Send initial message
     status_msg = await ctx.send(f"🎙️ Generating TTS... (this may take ~30 seconds)")
     
-    temp_audio_path = "tts_temp_output.wav"
+    temp_audio_path = None
     voice_client = None
 
     try:
@@ -709,8 +830,9 @@ async def tts(
             return
 
         # Save the audio to a temporary file
-        with open(temp_audio_path, "wb") as f:
-            f.write(response.content)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+            temp_audio_path = temp_file.name
+            temp_file.write(response.content)
 
         await status_msg.edit(content="🔊 Joining voice channel and playing audio...")
 
@@ -754,7 +876,7 @@ async def tts(
             await voice_client.disconnect()
         
         # Always clean up temp file
-        if os.path.exists(temp_audio_path):
+        if temp_audio_path and os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
             print(f"Cleaned up temp TTS file: {temp_audio_path}")
 
@@ -889,6 +1011,7 @@ async def ask(
         author_id=ctx.author.id,
         prompt=(prompt or ""),
         referenced=referenced,
+        source_message=ctx.message,
     )
 
 
@@ -924,6 +1047,32 @@ def send_fact_check(target_message, context_messages):
             "searches": [],
             "reasoning": "",
         }
+
+
+def send_tldr(target_message: str) -> str:
+    """Send a TL;DR request to the /tldr endpoint for one message only."""
+    payload = {
+        "key": ALEX_KEY,
+        "target_message": target_message,
+    }
+    try:
+        response = requests.post(f"{API_URL}/tldr", json=payload, timeout=120)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("response", "No response field found")
+
+        detail = ""
+        try:
+            data = response.json()
+            detail = data.get("error") or data.get("message") or str(data)
+        except ValueError:
+            detail = (response.text or "").strip()
+        if detail:
+            return f"Error {response.status_code}: {detail}"
+        return f"Error: Received status code {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        print(f"TLDR request failed: {e}")
+        return "Error: Could not connect to the API."
 
 
 async def _handle_fact_turn(
@@ -1186,6 +1335,41 @@ async def fact(
         referenced=referenced,
         requester_message_id=ctx.message.id,
     )
+
+
+@bot.command(
+    name="tldr",
+    brief="Summarize a replied message",
+    description="Reply to a message with !tldr to get a short, neutral summary influenced only by that message.",
+)
+async def tldr(ctx):
+    referenced = None
+    if ctx.message.reference and ctx.message.reference.message_id:
+        try:
+            referenced = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await ctx.send("Could not find the referenced message.")
+            return
+
+    if referenced is None:
+        await ctx.send("Reply to a message with `!tldr`.")
+        return
+
+    target_message = (referenced.content or "").strip()
+    if not target_message:
+        await ctx.send("The referenced message has no text content to summarize.")
+        return
+
+    async with ctx.channel.typing():
+        response = await asyncio.to_thread(send_tldr, target_message)
+
+    if not response or response.startswith("Error"):
+        await ctx.send(f"Could not complete the TL;DR. {response}")
+        return
+
+    max_length = 2000
+    for i in range(0, len(response), max_length):
+        await ctx.send(response[i : i + max_length])
 
 
 @bot.command(
