@@ -39,6 +39,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # Ensure CHANNEL_ID is an integer
 
 CHAT_KEY = os.getenv("CHAT_KEY")
 ALEX_KEY = os.getenv("ALEX_KEY")
+FRIEND_DB_KEY = os.getenv("FRIEND_DB_KEY", "7f1E94p--ur4vdYKMMM8Sj4UQ1LW0Hg3x_3qo-e8Oks")
 
 # --- Firebase Initialization ---
 try:
@@ -86,6 +87,18 @@ show_thinking = True  # Toggle for displaying thinking messages
 tracking_enabled = True  # Toggle for online tracking
 startup_changelog_posted = False  # Prevent duplicate posts on reconnect
 CHANGELOG_ENTRIES = [
+    {
+        "title": "Birthday shoutouts",
+        "details": "The bot now checks stored friend birthdays each morning and posts a short birthday message.",
+    },
+    {
+        "title": "Ask memory and style rebuild",
+        "details": "`!ask` now gets friend context, can write useful memories automatically, and uses the sentiment-pair corpus for Alex-style wording.",
+    },
+    {
+        "title": "Brave/SearXNG search support",
+        "details": "`!fact` and `!ask` search can use Brave by default, with SearXNG or Ollama as fallback providers.",
+    },
     {
         "title": "!tldr command added",
         "details": "Reply to any text message with `!tldr` to get a short, neutral summary based only on that replied message.",
@@ -383,6 +396,21 @@ def send_ask(
         return "Error: Could not connect to the API."
 
 
+def get_birthdays_today():
+    payload = {"key": FRIEND_DB_KEY}
+    try:
+        response = requests.post(f"{API_URL}/birthdays/today", json=payload, timeout=30)
+        if response.status_code != 200:
+            print(f"Birthday check failed with status {response.status_code}: {response.text}")
+            return []
+        data = response.json()
+        birthdays = data.get("birthdays", [])
+        return birthdays if isinstance(birthdays, list) else []
+    except requests.exceptions.RequestException as e:
+        print(f"Birthday check request failed: {e}")
+        return []
+
+
 def _trim_thread_history(history: List[Dict[str, Any]], max_chars: int = 12000) -> List[Dict[str, Any]]:
     """Keep most recent turns under a character budget."""
     if not history:
@@ -592,6 +620,8 @@ async def on_ready():
             startup_changelog_posted = True
     if not reset_daily_count.is_running():
         reset_daily_count.start()
+    if not birthday_check.is_running():
+        birthday_check.start()
 
 
 @bot.event
@@ -1633,6 +1663,27 @@ async def reset_daily_count():
         print("Reset message channel not found.")
 
 
+@tasks.loop(time=time(9, 0, tzinfo=eastern))
+async def birthday_check():
+    today_key = get_firebase_safe_date()
+    print(f"Checking birthdays for {today_key}")
+    birthdays = await asyncio.to_thread(get_birthdays_today)
+    if not birthdays:
+        return
+
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Birthday message channel not found.")
+        return
+
+    for birthday in birthdays:
+        name = birthday.get("name")
+        if not name:
+            continue
+        message = f"Happy birthday {name}!"
+        await channel.send(message)
+
+
 # --- Run Bot ---
 if __name__ == "__main__":
     if not all(
@@ -1654,4 +1705,3 @@ if __name__ == "__main__":
         exit()
 
     bot.run(BOT_TOKEN)
-
